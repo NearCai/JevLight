@@ -188,23 +188,13 @@ the endpoint and model supplied by your deployment when needed. Credentials are
 read from command-line arguments or environment variables and are not stored
 in the repository.
 
-## Development
-
-Run the test suite and syntax checks before committing changes:
-
-```bash
-python -m unittest discover -s tests -v
-python -m py_compile models/*.py utils/*.py run_jev.py run_chatgpt.py run_rl_eval.py
-```
-
-When adding a benchmark, update both the table above and
-`results/benchmark_jinan.json` with the same horizon and metric definitions.
-
 ## Acknowledgements
 
-JevLight builds on the
-[LLMTSCS](https://github.com/usail-hkust/LLMTSCS) implementation and the
-[CityFlow](https://github.com/cityflow-project/CityFlow) traffic simulator.
+We gratefully acknowledge the authors and contributors of
+[LLMTSCS](https://github.com/usail-hkust/LLMTSCS), whose traffic-signal-control
+implementation provided an important foundation for this project, and
+[CityFlow](https://github.com/cityflow-project/CityFlow), whose high-performance
+traffic simulator powers the experiments and benchmarks.
 
 ## License
 
