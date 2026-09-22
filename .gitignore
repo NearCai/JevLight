@@ -1,0 +1,14 @@
+__pycache__/
+.pytest_cache/
+.venv/
+*.py[cod]
+.env
+errors/
+model/
+records/
+wandb/
+*_logs/
+cityflow.config
+data/
+CityFlow/
+t.json

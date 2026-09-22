@@ -1,0 +1,17 @@
+{
+  "dataset": "Jinan/3_4/anon_3_4_jinan_real.json",
+  "metrics": {
+    "lower_is_better": ["avg_queue", "avg_waiting_time_seconds", "avg_travel_time_seconds"],
+    "controllers": [
+      {"name": "Random", "horizon_seconds": 3600, "avg_queue": 630.59, "avg_waiting_time_seconds": 35.55, "avg_travel_time_seconds": 594.16},
+      {"name": "Fixedtime-30", "horizon_seconds": 3600, "avg_queue": 431.37, "avg_waiting_time_seconds": 50.70, "avg_travel_time_seconds": 451.45},
+      {"name": "MaxPressure", "horizon_seconds": 3600, "avg_queue": 199.68, "avg_waiting_time_seconds": 30.76, "avg_travel_time_seconds": 317.51},
+      {"name": "PressLight", "horizon_seconds": 3600, "reward": -102922.18, "avg_queue": 697.76, "avg_waiting_time_seconds": 41.33, "avg_travel_time_seconds": 630.93},
+      {"name": "MPLight", "horizon_seconds": 3600, "reward": -54065.13, "avg_queue": 391.74, "avg_waiting_time_seconds": 26.49, "avg_travel_time_seconds": 439.62},
+      {"name": "CoLight", "horizon_seconds": 3600, "reward": -129843.78, "avg_queue": 866.49, "avg_waiting_time_seconds": 51.12, "avg_travel_time_seconds": 750.91},
+      {"name": "DynamicLight", "horizon_seconds": 3600, "reward": -217488.85, "avg_queue": 609.80, "avg_waiting_time_seconds": 92.07, "avg_travel_time_seconds": 568.30},
+      {"name": "Qwen2.5-7B-Instruct", "horizon_seconds": 3600, "avg_queue": 189.14, "avg_waiting_time_seconds": 25.34, "avg_travel_time_seconds": 312.47},
+      {"name": "Jev-API-revised-prompt", "horizon_seconds": 3600, "reward": -36888.45, "avg_queue": 206.20, "avg_waiting_time_seconds": 47.76, "avg_travel_time_seconds": 312.75, "api_decisions": 978, "request_fallbacks": 95, "guardrail_corrections": 4}
+    ]
+  }
+}
