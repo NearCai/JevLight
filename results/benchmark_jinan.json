@@ -11,7 +11,8 @@
       {"name": "CoLight", "horizon_seconds": 3600, "reward": -129843.78, "avg_queue": 866.49, "avg_waiting_time_seconds": 51.12, "avg_travel_time_seconds": 750.91},
       {"name": "DynamicLight", "horizon_seconds": 3600, "reward": -217488.85, "avg_queue": 609.80, "avg_waiting_time_seconds": 92.07, "avg_travel_time_seconds": 568.30},
       {"name": "Qwen2.5-7B-Instruct", "horizon_seconds": 3600, "avg_queue": 189.14, "avg_waiting_time_seconds": 25.34, "avg_travel_time_seconds": 312.47},
-      {"name": "Jev-API-revised-prompt", "horizon_seconds": 3600, "reward": -36888.45, "avg_queue": 206.20, "avg_waiting_time_seconds": 47.76, "avg_travel_time_seconds": 312.75, "api_decisions": 978, "request_fallbacks": 95, "guardrail_corrections": 4}
+      {"name": "Jev-API-revised-prompt", "horizon_seconds": 3600, "reward": -36888.45, "avg_queue": 206.20, "avg_waiting_time_seconds": 47.76, "avg_travel_time_seconds": 312.75, "api_decisions": 978, "request_fallbacks": 95, "guardrail_corrections": 4},
+      {"name": "Laya-typed-decisions-local", "horizon_seconds": 3600, "reward": -34204.0, "avg_queue": 191.39305555555555, "avg_waiting_time_seconds": 47.363854997235485, "avg_travel_time_seconds": 303.87307386814933, "model_decisions": 1133, "request_fallbacks": 0, "guardrail_corrections": 944, "runtime_seconds": 135.12187504768372, "confidence_min": 0.0002, "confidence_mean": 0.0031216240070608948, "confidence_max": 0.0272}
     ]
   }
 }

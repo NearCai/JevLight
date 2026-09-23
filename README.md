@@ -1,69 +1,41 @@
 # JevLight
 
-JevLight is a [CityFlow](https://github.com/cityflow-project/CityFlow)-based
-traffic-signal-control framework centered on Jev, a structured controller for
-signal phase and green-time decisions. It provides a shared simulation
-pipeline for evaluating Jev across urban traffic scenarios, with optional
-rule-based and learning baselines for comparison.
+JevLight is a [CityFlow](https://github.com/cityflow-project/CityFlow) traffic
+signal control framework. It provides shared runners for Jev, local Laya,
+rule-based controllers, and reinforcement-learning baselines.
 
 ## Features
 
-- Structured Jev decisions for signal phase and green-time duration.
-- Explicit traffic-state prompts with queue, waiting-time, movement, and phase
-  urgency information.
-- CityFlow runners for Jinan, Hangzhou, and New York scenarios.
-- Reproducible rule-based, RL, and ChatGPT-compatible baselines.
-- Structured decision records for prompt/reply inspection.
+- Structured phase and green-time decisions.
+- Jinan, Hangzhou, and New York CityFlow scenarios.
+- Reproducible simulation records and benchmark summaries.
+- API and fully local decision-model runners.
 
 ## Requirements
 
-- Python 3.9 or a compatible Python environment
-- CityFlow
-- NumPy, pandas, PyTorch, TensorFlow, tqdm, W&B, and requests
-- A Linux environment is recommended for CityFlow experiments
-
-Install the runtime dependencies in a virtual environment:
+- Python 3.10+
+- CityFlow, NumPy, pandas, PyTorch, TensorFlow, tqdm, W&B, and requests
+- `laya==0.3.7` for the local Laya runner
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\Activate.ps1
-pip install cityflow numpy pandas torch tensorflow tqdm wandb requests
+source .venv/bin/activate
+pip install cityflow numpy pandas torch tensorflow tqdm wandb requests laya==0.3.7
 ```
 
 ## Quick start
 
-### Dataset layout
+Datasets are included under `data/`:
 
-The benchmark road networks and traffic-flow files are included under `data/`.
-They are sourced from the
-[Reinforcement Learning for Traffic Signal Control – Open Datasets](https://traffic-signal-control.github.io/#open-datasets)
-collection; refer to that site for the original dataset descriptions and
-required citations.
-The expected layout is:
-
-```text
-data/
-├── Jinan/
-│   └── 3_4/
-│       ├── roadnet_3_4.json
-│       └── anon_3_4_jinan_real.json
-├── Hangzhou/
-│   └── 4_4/
-└── NewYork/
-    └── 28_7/
-```
-
-Supported dataset names and road networks are:
-
-| `--dataset` | Directory | Road network |
+| Dataset | Directory | Road network |
 | --- | --- | --- |
 | `jinan` | `data/Jinan/3_4/` | `roadnet_3_4.json` |
 | `hangzhou` | `data/Hangzhou/4_4/` | `roadnet_4_4.json` |
 | `newyork_28x7` | `data/NewYork/28_7/` | `roadnet_28_7.json` |
 
-### Run JevLight
+### Jev API
 
-Set the API key locally; `.env.example` intentionally contains no credential.
+Set `TYPESAFE_API_KEY` locally, then run:
 
 ```bash
 export TYPESAFE_API_KEY="<your-api-key>"
@@ -74,21 +46,30 @@ python run_jev.py \
   --duration_mode choice
 ```
 
-The equivalent PowerShell setup is:
+Use `--no_fallback` to require a live API response. The runner also accepts
+`--endpoint`, `--jev_model`, `--timeout`, `--run_counts`, and
+`--max_concurrency`.
 
-```powershell
-$env:TYPESAFE_API_KEY = "<your-api-key>"
-python run_jev.py --dataset jinan --traffic_file anon_3_4_jinan_real.json
+### Local Laya
+
+The local runner uses `convaiinnovations/laya-typed-decisions` for four phase
+choices and six green-time choices (`15`--`40` seconds). No API key is needed.
+
+```bash
+export HF_HOME="$PWD/.cache/huggingface"
+WANDB_MODE=offline python run_laya.py \
+  --dataset jinan \
+  --traffic_file anon_3_4_jinan_real.json \
+  --run_counts 3600 \
+  --device cuda
 ```
 
-`run_jev.py` also accepts `--api_key`, `--endpoint`, `--jev_model`,
-`--timeout`, `--run_counts`, and `--max_concurrency`. API failures can use the
-local safety fallback; pass `--no_fallback` when a live API response is
-required.
+Use `--device cpu` without CUDA. The first run downloads the checkpoint to the
+local Hugging Face cache, which is ignored by Git. Use `--no_guardrail` to
+disable the safety rule or `--min_confidence` to enable low-confidence
+fallbacks. Decision probabilities are saved with the simulation trace.
 
-### Run an OpenAI-compatible baseline
-
-For SiliconFlow/Qwen:
+### OpenAI-compatible baseline
 
 ```bash
 export CHATGPT_API_KEY="<your-api-key>"
@@ -97,19 +78,7 @@ python run_chatgpt.py --prompt Commonsense \
   --gpt_version Qwen/Qwen2.5-7B-Instruct
 ```
 
-For Ollama, use an installed model and
-`--api_base http://localhost:11434/v1`, for example:
-
-```bash
-python run_chatgpt.py --prompt Commonsense \
-  --api_base http://localhost:11434/v1 \
-  --gpt_version qwen2.5:7b
-```
-
-Use `--no_fallback` to require a live model endpoint. `--run_counts` and
-`--timeout` control the simulation horizon and request timeout.
-
-### Run checks
+### Checks
 
 ```bash
 python run_jev.py --help
@@ -118,95 +87,52 @@ python -m unittest discover -s tests -v
 
 ## Decision modes
 
-Both `--phase_mode` and `--duration_mode` support the following modes:
+Jev supports `choice`, `score`, and `noul` modes for both phase and duration
+decisions. `choice` is the recommended mode. The simulator evaluates actions
+every five seconds and applies a five-second yellow transition when the phase
+changes.
 
-| Mode | Description |
-| --- | --- |
-| `choice` | Select one item from the supplied discrete options. |
-| `score` | Rank the options using returned level scores/probabilities. |
-| `noul` | Use the corresponding Jev mode without discrete-choice projection. |
-
-The recommended configuration is `choice` for both phase and duration. Jev
-chooses one of four phases and a green duration from `15`, `20`, `25`, `30`,
-`35`, or `40` seconds. The simulator checks for decisions every five seconds;
-changing phase inserts a separate five-second yellow transition.
-
-## Baselines and reproduction
+## Baselines
 
 | Category | Entrypoints |
 | --- | --- |
 | Rule-based | `run_random.py`, `run_fixedtime.py`, `run_maxpressure.py` |
 | Reinforcement learning | `run_presslight.py`, `run_mplight.py`, `run_colight.py`, `run_dynamiclight.py`, `run_rl_eval.py` |
-| LLM-based | `run_chatgpt.py`, `run_jev.py` |
+| Decision models | `run_chatgpt.py`, `run_jev.py`, `run_laya.py` |
 
-To reproduce the full-horizon RL rows on Jinan:
+For a full-horizon RL run on Jinan:
 
 ```bash
-for model in PressLight MPLight Colight DynamicLight; do
-  WANDB_MODE=offline python run_rl_eval.py --model "$model" --run_counts 3600
-done
+WANDB_MODE=offline python run_rl_eval.py --model PressLight --run_counts 3600
 ```
-
-All runners use the shared CityFlow configuration and environment. For
-publication-quality comparisons, use the same seed, horizon, and repeated
-trials for every controller.
 
 ## Benchmark
 
-The snapshot below uses `Jinan/3_4/anon_3_4_jinan_real.json` and a 3,600-second
-horizon. Queue length, waiting time, and travel time are emitted by `OneLine`;
-lower values are better. The machine-readable copy is
-[`results/benchmark_jinan.json`](results/benchmark_jinan.json).
+Jinan 3×4, 3,600-second horizon; lower is better. The complete machine-readable
+benchmark is [`results/benchmark_jinan.json`](results/benchmark_jinan.json).
 
-| Controller | Horizon (s) | Avg queue | Avg waiting time (s) | Avg travel time (s) |
-| --- | ---: | ---: | ---: | ---: |
-| Random | 3,600 | 630.59 | 35.55 | 594.16 |
-| Fixedtime (30 s) | 3,600 | 431.37 | 50.70 | 451.45 |
-| MaxPressure | 3,600 | 199.68 | 30.76 | 317.51 |
-| PressLight | 3,600 | 697.76 | 41.33 | 630.93 |
-| MPLight | 3,600 | 391.74 | 26.49 | 439.62 |
-| CoLight | 3,600 | 866.49 | 51.12 | 750.91 |
-| DynamicLight | 3,600 | 609.80 | 92.07 | 568.30 |
-| Qwen2.5-7B-Instruct | 3,600 | 189.14 | 25.34 | 312.47 |
-| Jev (API, revised prompt) | 3,600 | 206.20 | 47.76 | 312.75 |
-
-The Jev API run recorded 978 successful decisions, 95 transient fallbacks, and
-4 backlog-guardrail corrections. All 95 saved `decision_error` entries in that
-run were `HTTPSConnectionPool(...): Read timed out (read timeout=2.0)`, so they
-were request read timeouts rather than invalid traffic decisions. The current
-runner's default timeout is 30 seconds; use a live endpoint and matched seeds
-when comparing new prompt or model versions.
+| Controller | Avg queue | Avg waiting time (s) | Avg travel time (s) |
+| --- | ---: | ---: | ---: |
+| MaxPressure | 199.68 | 30.76 | 317.51 |
+| Jev API | 206.20 | 47.76 | 312.75 |
+| Laya local | 191.39 | 47.36 | 303.87 |
 
 ## Project layout
 
 ```text
-models/      Traffic-control agents, including the Jev adapter
-utils/       CityFlow environment, configuration, and shared pipelines
-prompts/     Prompt templates for the ChatGPT-compatible agent
-tests/       Jev contract and scheduling checks
+models/      Traffic-control agents
+utils/       CityFlow environment and shared pipeline
+prompts/     Prompt templates
+tests/       Unit and contract tests
 run_*.py     Experiment entrypoints
-results/     Versioned benchmark summaries
+results/     Benchmark summaries
 ```
-
-## Configuration
-
-The Jev adapter follows the
-[TypeSafe Jev quickstart](https://docs.typesafe.ai/introduction/quickstart).
-The default endpoint is `https://api.typesafe.ai/v1/systemone`; replace it with
-the endpoint and model supplied by your deployment when needed. Credentials are
-read from command-line arguments or environment variables and are not stored
-in the repository.
 
 ## Acknowledgements
 
-We gratefully acknowledge the authors and contributors of
-[LLMTSCS](https://github.com/usail-hkust/LLMTSCS), whose traffic-signal-control
-implementation provided an important foundation for this project, and
-[CityFlow](https://github.com/cityflow-project/CityFlow), whose high-performance
-traffic simulator powers the experiments and benchmarks. We also thank the
-[Reinforcement Learning for Traffic Signal Control – Open Datasets](https://traffic-signal-control.github.io/#open-datasets)
-project for providing the road networks and traffic-flow datasets included in
-this repository.
+JevLight builds on [LLMTSCS](https://github.com/usail-hkust/LLMTSCS),
+[CityFlow](https://github.com/cityflow-project/CityFlow), and the
+[traffic-signal-control open datasets](https://traffic-signal-control.github.io/#open-datasets).
 
 ## License
 

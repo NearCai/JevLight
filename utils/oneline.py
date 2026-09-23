@@ -48,7 +48,7 @@ class OneLine:
                     log_dir=self.dic_agent_conf["LOG_DIR"],
                     dataset=f"{self.roadnet}-{self.trafficflow}"
                 )
-            elif agent_name == "Jev":
+            elif agent_name in {"Jev", "Laya"}:
                 agent = DIC_AGENTS[agent_name](
                     dic_agent_conf=self.dic_agent_conf,
                     dic_traffic_env_conf=self.dic_traffic_env_conf,
@@ -101,16 +101,16 @@ class OneLine:
 
         start_time = time.time()
         state_action_log = [[] for _ in range(len(state))]
-        is_jev = self.dic_traffic_env_conf["MODEL_NAME"] == "Jev"
+        is_structured_signal_agent = self.dic_traffic_env_conf["MODEL_NAME"] in {"Jev", "Laya"}
         is_shared_network = self.dic_traffic_env_conf["MODEL_NAME"] in {
             "PressLight", "MPLight", "Colight", "EfficientPressLight",
             "EfficientMPLight", "EfficientColight", "DynamicLight",
         }
         while not done and current_time < total_run_cnt:
-            action_list = [-1] * len(state) if is_jev else []
+            action_list = [-1] * len(state) if is_structured_signal_agent else []
             duration_list = (
                 [-1] * len(state)
-                if is_jev or self.dic_traffic_env_conf["MODEL_NAME"] == "DynamicLight"
+                if is_structured_signal_agent or self.dic_traffic_env_conf["MODEL_NAME"] == "DynamicLight"
                 else None
             )
             threads = []
@@ -125,7 +125,7 @@ class OneLine:
 
                 one_state = state[i]
                 count = step_num
-                if is_jev:
+                if is_structured_signal_agent:
                     # CityFlow checks the remaining duration every 5 seconds;
                     # only intersections at a decision node call Jev.
                     if self.env.duration[i] <= 0:
@@ -149,8 +149,13 @@ class OneLine:
             # concurrently avoids turning a one-hour simulation into a many-
             # hour serial HTTP benchmark while preserving per-agent ordering
             # (phase request, then duration request).
-            if is_jev and jev_due:
+            if is_structured_signal_agent and jev_due:
                 max_workers = int(self.dic_traffic_env_conf.get("JEV_MAX_CONCURRENCY", len(jev_due)))
+                # CityFlow's C++ engine is not thread-safe for simultaneous state
+                # snapshots.  Local Laya inference is cheap and shares one model,
+                # so serialize it; hosted Jev requests may remain concurrent.
+                if self.dic_traffic_env_conf["MODEL_NAME"] == "Laya":
+                    max_workers = 1
                 max_workers = max(1, min(max_workers, len(jev_due)))
                 with ThreadPoolExecutor(max_workers=max_workers) as pool:
                     futures = {
@@ -163,13 +168,18 @@ class OneLine:
                         duration_list[i] = duration
                         state_action_log[i][-1]["duration"] = self.agents[i].duration_options[duration]
                         state_action_log[i][-1]["decision_source"] = (
-                            "jev" if self.agents[i].last_response is not None else "fallback"
+                            "fallback" if self.agents[i].last_response is None
+                            else self.dic_traffic_env_conf["MODEL_NAME"].lower()
                         )
                         if self.agents[i].last_error:
                             state_action_log[i][-1]["decision_error"] = self.agents[i].last_error
                         if self.agents[i].last_guardrail:
                             state_action_log[i][-1]["guardrail"] = self.agents[i].last_guardrail
-                        if self.agents[i].last_exchange:
+                        if getattr(self.agents[i], "last_confidence", None) is not None:
+                            state_action_log[i][-1]["decision_confidence"] = self.agents[i].last_confidence
+                        if getattr(self.agents[i], "last_probabilities", None) is not None:
+                            state_action_log[i][-1]["decision_probabilities"] = self.agents[i].last_probabilities
+                        if getattr(self.agents[i], "last_exchange", None):
                             state_action_log[i][-1]["jev_exchange"] = self.agents[i].last_exchange
 
             if is_shared_network:
@@ -215,14 +225,14 @@ class OneLine:
                     action = self.agents[i].temp_action_logger
                     action_list.append(action)
 
-            if is_jev:
+            if is_structured_signal_agent:
                 next_state, reward, done, _ = self.env.step(action_list, duration_list)
             else:
                 next_state, reward, done, _ = self.env.step(action_list)
 
             # log action
             for i in range(len(state)):
-                if is_jev:
+                if is_structured_signal_agent:
                     state_action_log[i][-1]["action"] = (
                         f"Phase-{action_list[i] + 1}" if action_list[i] >= 0 else None
                     )

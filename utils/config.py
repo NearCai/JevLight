@@ -7,6 +7,7 @@ from models.presslight_one import PressLightAgentOne
 from models.chatgpt import (ChatGPTTLCS_Wait_Time_Forecast, ChatGPTTLCS_Commonsense)
 from models.dynamiclight import DynamicLightAgent
 from models.jev import JevAgent
+from models.laya_agent import LayaAgent
 
 
 DIC_AGENTS = {
@@ -20,6 +21,7 @@ DIC_AGENTS = {
     "ChatGPTTLCSCommonsense": ChatGPTTLCS_Commonsense,
     "DynamicLight": DynamicLightAgent,
     "Jev": JevAgent,
+    "Laya": LayaAgent,
 }
 
 DIC_PATH = {
