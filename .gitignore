@@ -9,6 +9,5 @@ records/
 wandb/
 *_logs/
 cityflow.config
-data/
 CityFlow/
 t.json

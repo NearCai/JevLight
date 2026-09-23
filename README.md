@@ -1,9 +1,10 @@
 # JevLight
 
 JevLight is a [CityFlow](https://github.com/cityflow-project/CityFlow)-based
-traffic-signal-control framework. It evaluates Jev and OpenAI-compatible LLM
-controllers alongside rule-based and reinforcement-learning baselines through
-the same simulation pipeline.
+traffic-signal-control framework centered on Jev, a structured controller for
+signal phase and green-time decisions. It provides a shared simulation
+pipeline for evaluating Jev across urban traffic scenarios, with optional
+rule-based and learning baselines for comparison.
 
 ## Features
 
@@ -33,18 +34,26 @@ pip install cityflow numpy pandas torch tensorflow tqdm wandb requests
 
 ### Dataset layout
 
-Place the road network and traffic-flow files under the matching dataset
-directory:
+The benchmark road networks and traffic-flow files are included under `data/`.
+They are sourced from the
+[Reinforcement Learning for Traffic Signal Control – Open Datasets](https://traffic-signal-control.github.io/#open-datasets)
+collection; refer to that site for the original dataset descriptions and
+required citations.
+The expected layout is:
 
 ```text
 data/
-|-- Jinan/
-`-- 3_4/
-    |-- roadnet_3_4.json
-    `-- anon_3_4_jinan_real.json
+├── Jinan/
+│   └── 3_4/
+│       ├── roadnet_3_4.json
+│       └── anon_3_4_jinan_real.json
+├── Hangzhou/
+│   └── 4_4/
+└── NewYork/
+    └── 28_7/
 ```
 
-Supported dataset names are:
+Supported dataset names and road networks are:
 
 | `--dataset` | Directory | Road network |
 | --- | --- | --- |
@@ -194,7 +203,10 @@ We gratefully acknowledge the authors and contributors of
 [LLMTSCS](https://github.com/usail-hkust/LLMTSCS), whose traffic-signal-control
 implementation provided an important foundation for this project, and
 [CityFlow](https://github.com/cityflow-project/CityFlow), whose high-performance
-traffic simulator powers the experiments and benchmarks.
+traffic simulator powers the experiments and benchmarks. We also thank the
+[Reinforcement Learning for Traffic Signal Control – Open Datasets](https://traffic-signal-control.github.io/#open-datasets)
+project for providing the road networks and traffic-flow datasets included in
+this repository.
 
 ## License
 
