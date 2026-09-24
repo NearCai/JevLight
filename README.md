@@ -114,7 +114,7 @@ benchmark is [`results/benchmark_jinan.json`](results/benchmark_jinan.json).
 | Controller | Avg queue length | Avg waiting time (s) | Avg travel time (s) |
 | --- | ---: | ---: | ---: |
 | Random | 630.59 | 35.55 | 594.16 |
-| Fixedtime (30 s) | 431.37 | 50.70 | 451.45 |
+| Fixedtime | 431.37 | 50.70 | 451.45 |
 | MaxPressure | 199.68 | 30.76 | 317.51 |
 | PressLight | 697.76 | 41.33 | 630.93 |
 | MPLight | 391.74 | 26.49 | 439.62 |
