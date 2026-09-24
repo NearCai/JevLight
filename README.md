@@ -1,7 +1,7 @@
 # JevLight
 
 JevLight is a [CityFlow](https://github.com/cityflow-project/CityFlow) traffic
-signal control framework. It provides shared runners for Jev, local Laya,
+signal control framework. It provides shared runners for Jev, Laya,
 rule-based controllers, and reinforcement-learning baselines.
 
 ## Features
@@ -53,7 +53,7 @@ Use `--no_fallback` to require a live API response. The runner also accepts
 ### Local Laya
 
 The local runner uses `convaiinnovations/laya-typed-decisions` for four phase
-choices and six green-time choices (`15`--`40` seconds). No API key is needed.
+choices and six green-time choices (`15`--`40` seconds).
 
 ```bash
 export HF_HOME="$PWD/.cache/huggingface"
@@ -111,11 +111,18 @@ WANDB_MODE=offline python run_rl_eval.py --model PressLight --run_counts 3600
 Jinan 3×4, 3,600-second horizon; lower is better. The complete machine-readable
 benchmark is [`results/benchmark_jinan.json`](results/benchmark_jinan.json).
 
-| Controller | Avg queue | Avg waiting time (s) | Avg travel time (s) |
+| Controller | Avg queue length | Avg waiting time (s) | Avg travel time (s) |
 | --- | ---: | ---: | ---: |
+| Random | 630.59 | 35.55 | 594.16 |
+| Fixedtime (30 s) | 431.37 | 50.70 | 451.45 |
 | MaxPressure | 199.68 | 30.76 | 317.51 |
-| Jev API | 206.20 | 47.76 | 312.75 |
-| Laya local | 191.39 | 47.36 | 303.87 |
+| PressLight | 697.76 | 41.33 | 630.93 |
+| MPLight | 391.74 | 26.49 | 439.62 |
+| CoLight | 866.49 | 51.12 | 750.91 |
+| DynamicLight | 609.80 | 92.07 | 568.30 |
+| Qwen2.5-7B-Instruct | 189.14 | 25.34 | 312.47 |
+| Jev | 206.20 | 47.76 | 312.75 |
+| Laya | 191.39 | 47.36 | 303.87 |
 
 ## Project layout
 
@@ -130,9 +137,14 @@ results/     Benchmark summaries
 
 ## Acknowledgements
 
-JevLight builds on [LLMTSCS](https://github.com/usail-hkust/LLMTSCS),
-[CityFlow](https://github.com/cityflow-project/CityFlow), and the
-[traffic-signal-control open datasets](https://traffic-signal-control.github.io/#open-datasets).
+We gratefully acknowledge the authors and contributors of
+[LLMTSCS](https://github.com/usail-hkust/LLMTSCS), whose traffic-signal-control
+implementation provided an important foundation for this project, and
+[CityFlow](https://github.com/cityflow-project/CityFlow), whose high-performance
+traffic simulator powers the experiments and benchmarks. We also thank the
+[Reinforcement Learning for Traffic Signal Control – Open Datasets](https://traffic-signal-control.github.io/#open-datasets)
+project for providing the road networks and traffic-flow datasets included in
+this repository.
 
 ## License
 
