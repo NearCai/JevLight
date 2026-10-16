@@ -1,0 +1,31 @@
+[project]
+name = "jevlight"
+version = "0.1.0"
+description = "Jev decision models for SUMO traffic signal control"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pandas",
+    "requests",
+    "tqdm",
+    "typesafe-sdk",
+    "traci>=1.20",
+    "sumolib>=1.20",
+]
+
+[project.optional-dependencies]
+sumo = ["eclipse-sumo>=1.20"]
+tracking = ["wandb>=0.19,<1.0"]
+preparation = [
+    "tokenizers==0.22.2",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

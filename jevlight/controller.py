@@ -8,12 +8,12 @@ JevLight maps signal control onto that interface:
 
 - The **state** is the per-intersection observation in LLMLight semantics
   (queue, three-segment approaching vehicles, average waiting time, occupancy)
-  rendered as JSON.  With network packaging every active intersection of the
-  road network is packed into one shared state.
+  rendered as JSON. Cooperative requests include the target and only its
+  direct upstream/downstream neighbours, all at the current decision step.
 - The **question** for each active intersection is one ``Choice`` whose
   criteria are the signal phases available at that intersection, plus one
-  speculative ``Noul`` congestion judgment (near-zero cost, evaluated in the
-  same pass, used only for logging/analysis).
+  optional ``Noul`` congestion judgment for logging in both modes.
+  Both questions share the latest current state in one request.
 - The answer's ``choice`` is the phase to activate.  ``probabilities`` and
   ``confidence`` are recorded per decision and can gate a fallback.
 
@@ -27,10 +27,13 @@ same fallback.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import json
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from jevlight.jev_client import JevClient, JevResult
+from jevlight.cooperation import COMMUNICATION_THRESHOLD, TrajectoryRelations
 from jevlight.observation import (
+    ALL_LANES,
     CONTROLLED_LANES,
     IntersectionObservation,
     canonical_phase_name,
@@ -41,20 +44,23 @@ from jevlight.observation import (
 JEV_PACKAGINGS = ("network", "per_intersection")
 JEV_FALLBACKS = ("previous", "ranking")
 # Agent modes: ``jevlight`` is a per-intersection agent and ``cojevlight``
-# is the network-level coordinating agent — LLMLight's and CoLLMLight's
+# adds direct upstream/downstream context — LLMLight's and CoLLMLight's
 # request patterns and prompt wording on the same Jev wire format. The
 # pre-release names ``llmlight`` / ``collmlight`` stay accepted as aliases.
 AGENT_MODES = ("jevlight", "cojevlight")
 AGENT_MODE_ALIASES = {"llmlight": "jevlight", "collmlight": "cojevlight"}
 PHASE_QUESTION_PREFIX = "phase_"
 CONGESTION_QUESTION_PREFIX = "congested_"
+PROMPT_VERSION = "incoming-side-shared-instructions-v7"
+COOPERATIVE_PROMPT_VERSION = "incoming-side-trajectory-lanes-v6"
 
 # Packaging and speculative-question defaults per agent mode: jevlight is a
-# per-intersection agent with no congestion judgment; cojevlight decides
-# with one network-wide state per step.
+# per-intersection agent; both modes disable the optional congestion judgment by default.
+# cojevlight decides
+# with its own current state and direct neighbours per request.
 AGENT_MODE_DEFAULTS = {
     "jevlight": {"packaging": "per_intersection", "speculative": False},
-    "cojevlight": {"packaging": "network", "speculative": True},
+    "cojevlight": {"packaging": "per_intersection", "speculative": False},
 }
 
 
@@ -66,6 +72,7 @@ AGENT_MODE_DEFAULTS = {
 def jev_intersection_state(
     observation: IntersectionObservation,
     phase_duration: float,
+    include_right_turns: bool = False,
 ) -> Dict[str, Any]:
     """Render one intersection observation as a Jev-friendly JSON state.
 
@@ -74,7 +81,7 @@ def jev_intersection_state(
     vehicles in three distance segments (segment 1 nearest the junction).
     """
     lanes: Dict[str, Any] = {}
-    for lane_name in CONTROLLED_LANES:
+    for lane_name in (ALL_LANES if include_right_turns else CONTROLLED_LANES):
         lane = observation.lanes[lane_name]
         cells = lane.llmlight_cells
         lanes[lane_name] = {
@@ -86,7 +93,14 @@ def jev_intersection_state(
             ],
             "average_waiting_time_s": round(float(lane.avg_wait), 1),
             "occupancy": round(float(lane.occupancy), 3),
+            "road_length_m": round(float(lane.road_length), 1),
         }
+        if include_right_turns:
+            physical = set(lane.physical_lanes)
+            lanes[lane_name]["shared_movements"] = [
+                name for name, other in observation.lanes.items()
+                if name != lane_name and physical.intersection(other.physical_lanes)
+            ]
     current_phase = (
         canonical_phase_name(observation.current_phase)
         if observation.current_phase
@@ -96,9 +110,13 @@ def jev_intersection_state(
         int(phase_duration) if float(phase_duration).is_integer() else phase_duration
     )
     return {
+        "prompt_version": PROMPT_VERSION,
         "intersection_id": observation.intersection_id,
         "phase_duration_s": duration,
         "current_phase": current_phase,
+        "yellow_time_s": observation.yellow_time,
+        "green_time_if_switch_s": max(0.0, duration - observation.yellow_time),
+        "available_phases": [canonical_phase_name(phase) for phase in observation.phases],
         "lanes": lanes,
         "neighbours": list(observation.neighbours),
     }
@@ -107,12 +125,12 @@ def jev_intersection_state(
 def phase_criteria(
     observation: IntersectionObservation,
 ) -> Dict[str, str]:
-    """Choice criteria keyed by canonical phase for one intersection."""
+    """Candidate-specific movement meanings; shared policy belongs in instructions."""
     location_words = {
-        "N": "northbound (arriving from the south)",
-        "S": "southbound (arriving from the north)",
-        "E": "eastbound (arriving from the west)",
-        "W": "westbound (arriving from the east)",
+        "N": "arriving from the north",
+        "S": "arriving from the south",
+        "E": "arriving from the east",
+        "W": "arriving from the west",
     }
     movement_words = {"T": "through", "L": "left-turn"}
     criteria: Dict[str, str] = {}
@@ -129,8 +147,7 @@ def phase_criteria(
             )
         criteria[canonical] = (
             f"Activates {canonical[:2]} and {canonical[2:]}; "
-            f"releases {', '.join(parts)}. Prefer when those lanes hold the "
-            "largest combined queue, approaching, and waiting-time pressure."
+            f"releases {', '.join(parts)}."
         )
     return criteria
 
@@ -138,7 +155,7 @@ def phase_criteria(
 def jevlight_phase_question(
     observation: IntersectionObservation,
     phase_duration: float,
-    state_path: str = "intersection",
+    state_path: str = "$",
 ) -> Dict[str, Any]:
     """JevLight prompt: one agent per intersection, local view only.
 
@@ -160,7 +177,8 @@ def jevlight_phase_question(
         "length and vehicle waiting time. Movements whose lanes hold "
         "heavier queues, more approaching vehicles, or longer waits need "
         "the green signal sooner; the current phase's lanes have already "
-        "been moving."
+        "been moving. When comparing phases, prefer the phase whose lanes "
+        "hold the largest combined queue, approaching, and waiting-time pressure."
     )
     return {
         "type": "choice",
@@ -173,31 +191,52 @@ def cojevlight_phase_question(
     observation: IntersectionObservation,
     phase_duration: float,
     state_path: str,
-    network_size: int,
 ) -> Dict[str, Any]:
-    """CoJevLight prompt: one network-level agent, coordinated view.
-
-    Wording follows CoLLMLight's network-wise signal-control prompt: the
-    agent sees the whole road network in one shared state and answers one
-    question per intersection, coordinating with neighbouring junctions.
-    """
+    """Choose one target phase using its current state and direct neighbours."""
     criteria = phase_criteria(observation)
     duration = (
         int(phase_duration) if float(phase_duration).is_integer() else phase_duration
     )
     instructions = (
-        f"You are the network-level signal control agent coordinating "
-        f"{network_size} signalized intersections that share one state. For "
-        f"intersection `{state_path}`, choose the signal phase to activate "
-        f"for the next {duration} seconds to reduce congestion at this "
-        "junction and across the network. Judge each phase option by the "
-        f"lanes it serves in `{state_path}.lanes` — queued vehicles, "
-        "approaching vehicles by segment (segment 1 is nearest the "
-        "junction), and average waiting time — while keeping the timing "
-        "coordinated with the neighbouring junctions listed under "
-        f"`{state_path}.neighbours`. Heavier pressure on a phase's lanes "
-        "makes that phase the better choice; the current phase's lanes "
-        "have already been moving."
+        "You are the signal control agent for one intersection, cooperating with its direct neighbours. "
+        f"For the target at `{state_path}` ($ is the state root), choose one "
+        f"provided phase for the next {duration}-second decision interval. "
+        "Lane letters N/S/E/W denote the incoming side, not travel heading; "
+        "T/L/R mean through/left/right. NT travels north to south, ST south "
+        "to north, ET east to west, WT west to east. A phase releases only "
+        "its named movements. Right turns remain local context only. "
+        "cooperative_view is organized by each nonempty central T/L lane, with "
+        "upstream and downstream lists of (intersection_id, lane, current_phase, state). "
+        "Associations are learned by matching vehicle IDs leaving one movement "
+        "and arriving at another, retaining cumulative shares strictly above 5%. "
+        "Only straight/left movements are shared, and neighbour occupancy must "
+        "be greater than 0. No whole-neighbour topology or rankings are included. "
+        "An empty or missing list can mean unobserved connectivity or filtered "
+        "lanes; it does not establish free downstream space. These sampled "
+        "associations do not guarantee destinations of currently waiting vehicles. "
+        "Assess local queues and waiting times, then connected upstream demand "
+        "and downstream receiving space using occupancy (vehicles divided by "
+        "physical-lane storage capacity; 1 means estimated full, values may exceed 1). "
+        "shared_movements identifies overlapping physical lanes: do not add "
+        "their counts as if they were disjoint queues. "
+        "Avoid releases into nearly full downstream lanes; favor clearing receivers "
+        "that unblock queued upstream traffic when downstream space permits. "
+        "Do not let long waits grow without considering a feasible release. "
+        "Moving counts in approaching_by_segment cover 0-10%, 10-33%, 33-100% "
+        "of road_length_m back from the stop line; nearer arrivals matter sooner. "
+        "Use only the latest current state of the target and connected junctions. "
+        "Current state and learned associations do not provide other agents' next actions; do not "
+        "assume joint optimization or a promised green wave. "
+        "Compare local relief, spillback and upstream relief for each candidate "
+        "using the same current-state decision procedure. "
+        "local_phase_priority estimates local waiting-time relief in seconds "
+        "using ranking_assumed_speed_m_s; it ignores downstream blockage and "
+        "switching loss, so it is a reference ranking, not a mandatory answer. "
+        "Keeping current_phase allows the full interval of green; switching "
+        "first consumes yellow_time_s, leaving green_time_if_switch_s. "
+        "Current green does not imply a cleared queue. Select exactly one "
+        "provided option using the service's choice format; no reasoning text "
+        "or extra fields."
     )
     return {
         "type": "choice",
@@ -318,18 +357,22 @@ class JevLightController:
         self,
         client: JevClient,
         phase_duration: float,
-        packaging: str = "network",
+        packaging: Optional[str] = None,
         fallback: str = "previous",
         min_confidence: float = 0.0,
-        speculative: bool = True,
+        speculative: bool = False,
         max_workers: int = 8,
         agent_mode: str = "cojevlight",
+        cojev_history_steps: int = 0,
     ):
         agent_mode = AGENT_MODE_ALIASES.get(agent_mode, agent_mode)
         if agent_mode not in AGENT_MODES:
             raise ValueError(
                 f"agent_mode must be one of {AGENT_MODES}, got {agent_mode}"
             )
+        packaging = packaging or AGENT_MODE_DEFAULTS[agent_mode]["packaging"]
+        if agent_mode == "cojevlight" and packaging != "per_intersection":
+            raise ValueError("cojevlight requires per_intersection packaging (target and direct neighbours only)")
         if packaging not in JEV_PACKAGINGS:
             raise ValueError(
                 f"packaging must be one of {JEV_PACKAGINGS}, got {packaging}"
@@ -348,6 +391,10 @@ class JevLightController:
         self.speculative = speculative
         self.max_workers = max(1, int(max_workers))
         self.agent_mode = agent_mode
+        if cojev_history_steps != 0:
+            raise ValueError("cojev_history_steps must be 0: cooperative decisions use current state only")
+        self.trajectory_relations = TrajectoryRelations(CONTROLLED_LANES) if agent_mode == "cojevlight" else None
+        self.cooperative_states: Dict[str, Any] = {}
         self.previous_signals: Dict[str, str] = {}
         self.total_input_tokens = 0
         self.total_output_tokens = 0
@@ -362,7 +409,6 @@ class JevLightController:
         self,
         observation: IntersectionObservation,
         state_path: str,
-        network_size: Optional[int] = None,
     ) -> Dict[str, Any]:
         """The phase Choice question worded for the active agent mode."""
         if self.agent_mode == "jevlight":
@@ -373,7 +419,6 @@ class JevLightController:
             observation,
             self.phase_duration,
             state_path,
-            network_size or 1,
         )
 
     @staticmethod
@@ -470,6 +515,7 @@ class JevLightController:
             "packaging": self.packaging,
             "transport": self.client.transport,
             "model": self.client.model or "server-default",
+            "prompt_version": COOPERATIVE_PROMPT_VERSION if self.agent_mode == "cojevlight" else PROMPT_VERSION,
         }
 
     def _trace_decision(
@@ -507,33 +553,50 @@ class JevLightController:
 
     # -- decision paths ------------------------------------------------ #
 
+    def _prepare_cooperative_states(self, observations: Sequence[IntersectionObservation]) -> None:
+        self.cooperative_states = {}
+        for observation in observations:
+            state = jev_intersection_state(observation, self.phase_duration, include_right_turns=True)
+            state["prompt_version"] = COOPERATIVE_PROMPT_VERSION
+            state.pop("neighbours", None)
+            state["cooperation_source"] = "observed_vehicle_transitions"
+            available = set(state["available_phases"])
+            state["ranking_assumed_speed_m_s"] = 11.11
+            state["local_phase_priority"] = [
+                {"phase": phase, "estimated_waiting_time_reduction_s": round(score, 1)}
+                for phase, score in rank_phases(observation, self.phase_duration)
+                if phase in available
+            ]
+            self.cooperative_states[observation.intersection_id] = state
+
     def _decide_network(
         self,
         observations: Sequence[IntersectionObservation],
         active: Sequence[IntersectionObservation],
         step: int,
     ) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
+        if self.agent_mode == "cojevlight":
+            raise ValueError("cojevlight does not support network packaging")
         state: Dict[str, Any] = {
             "scenario": (
                 "Traffic signal control. The state holds every signalized "
-                "intersection of the road network; each has eight "
-                "signal-controlled lanes named like ET (eastbound through) "
-                "or WL (westbound left-turn). Right turns are always allowed "
-                "and not signalized."
+                "intersection of the road network. Movement codes name the "
+                "incoming side: ET is through from east to west; WL is "
+                "left-turn from west toward north on a regular junction. "
+                "Only the provided phase criteria are selectable. Right-turn "
+                "movements supply context, not extra phase choices."
             ),
             "intersections": {
-                observation.intersection_id: jev_intersection_state(
-                    observation, self.phase_duration
-                )
+                observation.intersection_id: jev_intersection_state(observation, self.phase_duration)
                 for observation in observations
             },
         }
         questions: Dict[str, Any] = {}
         for observation in active:
-            state_path = f"intersections.{observation.intersection_id}"
+            state_path = f"intersections[{json.dumps(observation.intersection_id)}]"
             questions[f"{PHASE_QUESTION_PREFIX}{observation.intersection_id}"] = (
                 self._phase_question(
-                    observation, state_path, network_size=len(observations)
+                    observation, state_path
                 )
             )
             if self.speculative:
@@ -566,24 +629,36 @@ class JevLightController:
         requests: List[Tuple[IntersectionObservation, Any, Dict[str, Any]]] = []
         for observation in active:
             state = jev_intersection_state(observation, self.phase_duration)
+            if self.agent_mode == "cojevlight":
+                state = dict(self.cooperative_states[observation.intersection_id])
+                state["cooperative_view"] = self.trajectory_relations.view(
+                    observation, self.cooperative_states, include_empty_neighbours=False,
+                    occupancy_threshold=COMMUNICATION_THRESHOLD,
+                )
             questions: Dict[str, Any] = {
                 f"{PHASE_QUESTION_PREFIX}{observation.intersection_id}": (
-                    self._phase_question(observation, "intersection")
+                    self._phase_question(observation, "$")
                 )
             }
             if self.speculative:
                 questions[
                     f"{CONGESTION_QUESTION_PREFIX}{observation.intersection_id}"
-                ] = congestion_question("intersection")
+                ] = congestion_question("$")
             requests.append((observation, state, questions))
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            results = list(
-                executor.map(
-                    lambda item: self.client.evaluate(item[1], item[2]),
-                    requests,
+        if getattr(self.client, 'batch_size', 0):
+            results = self.client.evaluate_batch([
+                {'state': state, 'questions': questions} for _, state, questions in requests])
+        else:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                results = list(
+                    executor.map(
+                        lambda item: self.client.evaluate(item[1], item[2]),
+                        requests,
+                    )
                 )
-            )
+        if len(results) != len(requests):
+            raise ValueError('batch result count mismatch')
 
         actions: Dict[str, int] = {}
         traces: List[Dict[str, Any]] = []
@@ -604,6 +679,9 @@ class JevLightController:
         observations: Sequence[IntersectionObservation],
         step: int,
     ) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
+        if self.agent_mode == "cojevlight":
+            self.trajectory_relations.observe(observations, step)
+            self._prepare_cooperative_states(observations)
         active = [
             observation for observation in observations if not observation.empty
         ]

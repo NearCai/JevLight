@@ -1,0 +1,17 @@
+model_id = "interfaze-ai/lev"
+family = "lev"
+batch_linear = "author"
+batch_attention = "native_flash"
+batch_kernel = "causal_conv"
+batch_fused_ops = true
+batch_mlp = "author"
+batch_encoding_cache = true
+weights_path = ".local/models/lev/weights"
+max_length = 262144
+host = "127.0.0.1"
+port = 8123
+inference_engine = "vllm_marker"
+engine_token_budget = 65536
+engine_gpu_memory_utilization = 0.85
+engine_max_length = 32768
+engine_max_sequences = 392

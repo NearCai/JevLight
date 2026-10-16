@@ -28,8 +28,8 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 import time
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -72,6 +72,9 @@ class JevResult:
     latency: float = 0.0
     error: Optional[str] = None
     rate_limited: bool = False
+    http_status: Optional[int] = None
+    credential_id: Optional[str] = None
+    credential_attempts: int = 0
 
 
 class JevClient:
@@ -83,10 +86,12 @@ class JevClient:
         model: Optional[str] = None,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        timeout: float = 30.0,
+        timeout: float = 120.0,
         max_retries: int = 3,
         min_interval: float = 0.0,
         mock: bool = False,
+        batch_size: int = 0,
+        key_pool: Optional[str | bool] = None,
     ):
         if transport not in JEV_TRANSPORTS:
             raise ValueError(
@@ -104,6 +109,9 @@ class JevClient:
         self.max_retries = max(0, int(max_retries))
         self.min_interval = max(0.0, float(min_interval))
         self.mock = mock
+        self.batch_size = int(batch_size)
+        if self.batch_size < 0 or (self.batch_size and transport != 'local'):
+            raise ValueError('batch_size must be nonnegative and requires local transport')
         self._last_request_time = 0.0
         if transport == "mcp":
             self.base_url = (base_url or DEFAULT_MCP_BASE_URL).rstrip("/")
@@ -115,8 +123,17 @@ class JevClient:
             ).rstrip("/")
         else:
             self.base_url = (base_url or DEFAULT_OFFICIAL_BASE_URL).rstrip("/")
+        self._key_pool = None
+        self._pool_clients = {}
+        self._pool_lock = threading.Lock()
+        pool_path = os.environ.get("JEV_API_KEY_POOL") if key_pool is None else key_pool
+        if pool_path and transport == "official" and not mock:
+            from .api_key_pool import KeyPool
+            if self.base_url != DEFAULT_OFFICIAL_BASE_URL:
+                raise ValueError("Credential pool is restricted to the official TypeSafe endpoint")
+            self._key_pool = KeyPool(pool_path)
+            self.api_key = self._key_pool.select()["secret"]
         self._sdk_client = None
-        self._sdk_lock = threading.Lock()
         self._mcp_session = None
         self._mcp_initialized = False
         if not mock:
@@ -125,17 +142,59 @@ class JevClient:
                     "Jev API key missing: pass api_key or set one of "
                     + ", ".join(JEV_API_KEY_ENV_VARS)
                 )
-            if transport == "official":
+            if transport == "official" and self._key_pool is None:
                 try:
-                    from typesafe_sdk import TypeSafeClient
+                    from typesafe_sdk import RetryPolicy, TypeSafeClient
 
-                    self._sdk_client = TypeSafeClient(api_key=self.api_key)
+                    self._sdk_client = TypeSafeClient(
+                        api_key=self.api_key,
+                        base_url=self.base_url,
+                        timeout=self.timeout,
+                        retry=RetryPolicy(max_retries=self.max_retries, timeout=self.timeout),
+                    )
                 except ImportError:
                     self._sdk_client = None
 
     # ------------------------------------------------------------------ #
     # Public entry point
     # ------------------------------------------------------------------ #
+
+    def evaluate_batch(self, requests):
+        """One round's independent states; no cross-intersection state merging."""
+        import requests as http
+
+        if not requests:
+            return []
+        if not self.batch_size or self.transport != 'local':
+            raise ValueError('local batch transport is not enabled')
+        if self.mock:
+            return [self._mock_evaluate(item['state'], item['questions'], time.time())
+                    for item in requests]
+        self._pace()
+        started = time.time()
+        headers = {'Content-Type': 'application/json'}
+        if self.api_key is not None:
+            headers['Authorization'] = f'Bearer {self.api_key}'
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = http.post(f'{self.base_url}/v1/systemone/batch',
+                    json={'requests': requests, 'batch_size': self.batch_size},
+                    headers=headers, timeout=self.timeout)
+                response.raise_for_status()
+                outcomes = response.json()['results']
+                if not isinstance(outcomes, list) or len(outcomes) != len(requests):
+                    raise ValueError('batch result count mismatch')
+                return [JevResult(answers=outcome['answers'], model=outcome.get('model'),
+                    input_tokens=int(outcome.get('usage', {}).get('input_tokens', 0)),
+                    output_tokens=int(outcome.get('usage', {}).get('output_tokens', 0)),
+                    latency=time.time()-started) for outcome in outcomes]
+            except Exception as exc:
+                if attempt < self.max_retries:
+                    time.sleep(2 ** attempt)
+                    continue
+                return [JevResult(error=f'{type(exc).__name__}: {exc}',
+                    latency=time.time()-started,
+                    rate_limited=self._is_rate_limited(str(exc))) for _ in requests]
 
     def evaluate(
         self,
@@ -151,6 +210,21 @@ class JevClient:
         if self.mock:
             return self._mock_evaluate(state, questions, time.time())
         self._pace()
+        if self._key_pool is not None:
+            def call(key):
+                with self._pool_lock:
+                    client = self._pool_clients.get(key["id"])
+                    if client is None:
+                        client = JevClient(transport="official", model=self.model,
+                                           api_key=key["secret"], base_url=self.base_url,
+                                           timeout=self.timeout, max_retries=self.max_retries,
+                                           key_pool=False)
+                        self._pool_clients[key["id"]] = client
+                return client._evaluate_once(state, questions)
+            return self._key_pool.evaluate(call)
+        return self._evaluate_once(state, questions)
+
+    def _evaluate_once(self, state, questions):
         started = time.time()
         if self.transport == "mcp":
             return self._evaluate_mcp(state, questions, started)
@@ -371,18 +445,20 @@ class JevClient:
         started: float,
     ) -> JevResult:
         try:
-            with self._sdk_lock:
-                response = self._sdk_client.system_one(
-                    state=state,
-                    questions=dict(questions),
-                    model=self.model or DEFAULT_JEV_MODEL,
-                    timeout=self.timeout,
-                )
+            # The SDK uses httpx2.Client, which supports sharing across threads.
+            # Keep network calls concurrent; the controller bounds worker count.
+            response = self._sdk_client.system_one(
+                state=state,
+                questions=dict(questions),
+                model=self.model or DEFAULT_JEV_MODEL,
+                timeout=self.timeout,
+            )
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
             return JevResult(
                 latency=time.time() - started,
                 error=message,
+                http_status=getattr(exc, "status", getattr(exc, "status_code", None)),
                 rate_limited=self._is_rate_limited(message),
             )
         answers: Dict[str, Dict[str, Any]] = {}
@@ -465,13 +541,15 @@ class JevClient:
                 )
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"
-                if attempt < self.max_retries:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if attempt < self.max_retries and not (self.transport == "official" and status == 402):
                     time.sleep(delay)
                     delay *= 2
                     continue
                 return JevResult(
                     latency=time.time() - started,
                     error=message,
+                    http_status=status,
                     rate_limited=self._is_rate_limited(message),
                 )
         return JevResult(

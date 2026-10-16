@@ -158,7 +158,7 @@ class VllmBackend:
         self,
         base_url: str = DEFAULT_VLLM_BASE_URL,
         model: Optional[str] = None,
-        timeout: float = 30.0,
+        timeout: float = 120.0,
         max_retries: int = 2,
         logprobs: int = DEFAULT_LOGPROBS,
     ):
@@ -380,7 +380,7 @@ def make_handler(backend: Any, model_name: Optional[str]):
                 self._send(404, {"error": {"message": f"no route {self.path}"}})
 
         def do_POST(self) -> None:  # noqa: N802 - http.server naming
-            if self.path.rstrip("/") != "/v1/systemone":
+            if self.path.rstrip("/") not in ("/v1/systemone", "/v1/systemone/batch"):
                 self._send(404, {"error": {"message": f"no route {self.path}"}})
                 return
             try:
@@ -388,6 +388,26 @@ def make_handler(backend: Any, model_name: Optional[str]):
                 request = json.loads(self.rfile.read(length) or b"{}")
             except (ValueError, json.JSONDecodeError) as exc:
                 self._send(400, {"error": {"message": f"bad request body: {exc}"}})
+                return
+            if self.path.rstrip('/') == '/v1/systemone/batch':
+                items = request.get('requests')
+                size = request.get('batch_size')
+                if (not isinstance(items, list) or not items or
+                    type(size) is not int or size < 1 or any(
+                        not isinstance(item, dict) or
+                        not isinstance(item.get('questions'), Mapping) for item in items)):
+                    self._send(400, {'error': {'message': 'invalid batch requests or batch_size'}})
+                    return
+                if not hasattr(backend, 'evaluate_batch'):
+                    self._send(400, {'error': {'message': 'backend does not support batches'}})
+                    return
+                try:
+                    outcomes = backend.evaluate_batch(items, size)
+                    if len(outcomes) != len(items):
+                        raise ValueError('batch result count mismatch')
+                    self._send(200, {'results': outcomes})
+                except Exception as exc:
+                    self._send(502, {'error': {'message': f'{type(exc).__name__}: {exc}'}})
                 return
             state = request.get("state")
             questions = request.get("questions")
@@ -472,7 +492,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         default=None,
         help="Model id sent to the completions endpoint (default: --model)",
     )
-    parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--max_retries", type=int, default=2)
     parser.add_argument(
         "--logprobs",

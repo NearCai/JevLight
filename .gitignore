@@ -2,23 +2,19 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
-
-# Run artifacts
+.venv/
+.venv-jev/
+.local/
+results/
 records/
 model/
 errors/
 debug/
 logs/
-
-# Local model serving (scripts/serve_jev.sh)
-.venv-jev/
-
-# Environments and secrets
 .env
+.env.*
 *.key
-
-# Editors / OS
 .idea/
 .vscode/
 .DS_Store
-tests/
+AGENTS.md

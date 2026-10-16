@@ -1,0 +1,11 @@
+[project]
+name = "jevlight-shared-inference-engine"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "peft==0.19.1",
+    "vllm==0.19.0",
+    "torch==2.10.0",
+    "transformers==4.57.6",
+    "nvidia-cuda-runtime-cu12==12.8.90",
+]

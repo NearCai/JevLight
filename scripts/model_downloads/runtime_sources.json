@@ -1,0 +1,42 @@
+{
+  "laya": {
+    "url": "https://github.com/NandhaKishorM/laya.git",
+    "revision": "1adc59f7e371deb601fcfa18a14e25db238addcc",
+    "path": ".local/model_sources/laya"
+  },
+  "von": {
+    "url": "https://github.com/wfzyx/von.git",
+    "revision": "9319ced779f8232ab1d8d3e9c69cdc52ddce77ec",
+    "path": ".local/model_sources/von"
+  },
+  "kev": {
+    "url": "https://github.com/jaredpalmer/kev.git",
+    "revision": "5e42a7a03f28134853dd3ff77461457e921e5ec1",
+    "path": ".local/model_sources/kev"
+  },
+  "agent-jev": {
+    "url": "https://github.com/malevrigns/agent-jev.git",
+    "revision": "1c2c1b1ae1dc427d4cc851ef7460a1112b0cb3e1",
+    "path": ".local/model_sources/agent-jev"
+  },
+  "open-jev": {
+    "url": "https://github.com/Zefan-Cai/Open-Jev.git",
+    "revision": "bd4118882f733574a3250a4b65fe4d884130c08b",
+    "path": ".local/model_sources/open-jev"
+  },
+  "lev": {
+    "url": "https://github.com/InterfazeAI/lev.git",
+    "revision": "a24018af3eee03198c3ac95dba09d22d611e5352",
+    "path": ".local/model_sources/lev"
+  },
+  "gliner2": {
+    "url": "https://github.com/fastino-ai/GLiNER2.git",
+    "revision": "08c8c8df0803075035ac6a02e8ee8c5554d2e06b",
+    "path": ".local/model_sources/gliner2"
+  },
+  "vllm-jev": {
+    "url": "https://github.com/mode-io/vllm-jev.git",
+    "revision": "9b1687d92dc60a5193a30fa6f966ecd505c2fea8",
+    "path": ".local/model_sources/vllm-jev"
+  }
+}

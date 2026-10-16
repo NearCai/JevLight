@@ -1,0 +1,12 @@
+model_id = "ZefanCai/Open-Jev-2B"
+family = "open-jev"
+batch_linear = "native_shape"
+co_batch_attention = "native_flash"
+weights_path = ".local/models/open-jev-2b/weights"
+max_length = 262144
+host = "127.0.0.1"
+port = 8123
+
+inference_engine = "vllm_pooling"
+engine_token_budget = 262144
+engine_gpu_memory_utilization = 0.75

@@ -1,0 +1,6 @@
+model_id = "Valen-Team/Valen-2B"
+family = "valen"
+weights_path = ".local/models/valen-2b/weights"
+max_length = 32768
+host = "127.0.0.1"
+port = 8123

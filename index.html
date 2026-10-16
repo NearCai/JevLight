@@ -4,10 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>JevLight — Traffic Signal Control with Jev</title>
-<meta name="description" content="JevLight maps traffic signal control onto Jev, the System One decision model — one typed API call per control step for an entire SUMO road network, with millisecond-scale decisions and graceful fallbacks.">
+<meta name="description" content="JevLight maps traffic signal control onto Jev, the System One decision model — one typed API call per active intersection and control step, with millisecond-scale decisions and graceful fallbacks.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='16' y='4' width='32' height='56' rx='8' fill='%230a0e13' stroke='%23333' stroke-width='2'/%3E%3Ccircle cx='32' cy='18' r='7' fill='%23ff5d5d'/%3E%3Ccircle cx='32' cy='34' r='7' fill='%23ffc531'/%3E%3Ccircle cx='32' cy='50' r='7' fill='%233ddc84'/%3E%3C/svg%3E">
 <meta property="og:title" content="JevLight — Traffic Signal Control with Jev">
-<meta property="og:description" content="One typed API call per control step for an entire SUMO road network. Millisecond-scale decisions, graceful fallbacks, built-in 3D visualizer.">
+<meta property="og:description" content="One typed API call per active intersection and control step. Millisecond-scale decisions, graceful fallbacks, built-in 3D visualizer.">
 <meta property="og:image" content="https://usail-hkust.github.io/JevLight/assets/demo_poster.jpg">
 <meta property="og:type" content="website">
 <style>
@@ -131,18 +131,6 @@
   .btn-ghost:hover { background: rgba(255,255,255,0.1); }
   .btn svg { width: 16px; height: 16px; fill: currentColor; }
 
-  .hero-stats {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
-    background: var(--border); border: 1px solid var(--border); border-radius: 16px; overflow: hidden;
-    max-width: 860px; margin: 0 auto;
-  }
-  .hero-stats > div { background: var(--panel); padding: 20px 12px; }
-  .hero-stats .num { font-size: clamp(22px, 3vw, 30px); font-weight: 800; letter-spacing: -0.02em; font-family: var(--mono); }
-  .hero-stats .num .u { font-size: 0.55em; color: var(--muted); font-weight: 600; }
-  .hero-stats .lbl { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
-  .n-green { color: var(--green); } .n-amber { color: var(--amber); } .n-red { color: var(--red); } .n-blue { color: var(--blue); }
-  @media (max-width: 720px) { .hero-stats { grid-template-columns: repeat(2, 1fr); } }
-
   /* ---------- sections ---------- */
   section { max-width: var(--maxw); margin: 0 auto; padding: 84px 24px 0; }
   .sec-head { margin-bottom: 38px; }
@@ -227,31 +215,59 @@
   }
 
   /* ---------- benchmarks ---------- */
-  .bench-note { color: var(--faint); font-size: 13px; margin-bottom: 22px; }
-  .bench-table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; }
-  .bench-table th {
-    text-align: left; font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
-    color: var(--faint); padding: 13px 18px; border-bottom: 1px solid var(--border-strong); background: rgba(255,255,255,0.02);
-  }
-  .bench-table td { padding: 11px 18px; border-bottom: 1px solid var(--border); font-size: 14px; vertical-align: middle; }
+  #benchmarks { scroll-margin-top: 88px; }
+  #benchmarks .sec-head { margin-bottom: 28px; }
+  .bench-toolbar { display: flex; gap: 14px; align-items: end; flex-wrap: wrap; margin-bottom: 18px; }
+  .bench-toolbar label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); width: 230px; }
+  .bench-toolbar select { width: 100%; background: var(--panel); color: var(--text); border: 1px solid var(--border-strong); border-radius: 8px; padding: 11px 10px; font: 14px var(--sans); color-scheme: dark; }
+  .bench-context { color: var(--muted); font-size: 12px; margin: 0 0 14px; }
+  #benchmarks :focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+  .bench-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; font-variant-numeric: tabular-nums; }
+  .bench-table th { text-align: left; width: 24%; color: var(--muted); padding: 0; border-bottom: 1px solid var(--border-strong); background: rgba(255,255,255,.025); }
+  .bench-table th:first-child { width: 36%; }
+  .bench-table th:last-child { width: 16%; }
+  .bench-table th button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 17px 20px; border: 0; background: none; color: inherit; font: 600 12px var(--sans); cursor: pointer; text-align: left; }
+  .bench-table th button:hover { color: var(--text); background: rgba(255,255,255,.035); }
+  .bench-table th[aria-sort="ascending"], .bench-table th[aria-sort="descending"] { color: var(--green); }
+  .sort-arrow { opacity: .4; font-size: 13px; }
+  th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { opacity: 1; }
+  .bench-table td { padding: 15px 20px; border-bottom: 1px solid var(--border); vertical-align: middle; }
   .bench-table tr:last-child td { border-bottom: none; }
-  .bench-table tr:hover td { background: rgba(255,255,255,0.025); }
-  .bench-table .ctrl { font-weight: 650; white-space: nowrap; }
-  .bench-table .ctrl .own { font-family: var(--mono); font-size: 10px; color: var(--green); border: 1px solid rgba(61,220,132,0.4); border-radius: 999px; padding: 1px 7px; margin-left: 8px; vertical-align: 1px; }
-  .bar-cell { min-width: 160px; }
-  .bar-wrap { background: rgba(255,255,255,0.06); border-radius: 999px; height: 8px; width: 100%; overflow: hidden; }
-  .bar { height: 100%; border-radius: 999px; width: 0; transition: width 1.1s cubic-bezier(.22,.8,.3,1); }
-  .bar.best { background: linear-gradient(90deg, #2fd67a, #7ef0ae); }
-  .bar.own { background: linear-gradient(90deg, #ffc531, #ffd976); }
-  .bar.rest { background: rgba(147, 161, 176, 0.55); }
-  .num-cell { font-family: var(--mono); font-size: 13px; white-space: nowrap; }
-  .best-val { color: var(--green); font-weight: 700; }
-  .table-scroll { overflow-x: auto; border-radius: 16px; }
-  .table-scroll::-webkit-scrollbar { height: 8px; }
-  .table-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 8px; }
+  .bench-table tbody tr:hover { background: rgba(255,255,255,.025); }
+  .bench-model { font-size: 14px; font-weight: 600; }
+  .bench-number { font: 500 14px var(--mono); white-space: nowrap; }
+  .bench-number small { font-size: 11px; color: var(--muted); }
+  .bench-delta { font: 500 13px var(--mono); white-space: nowrap; }
+  .bench-delta.improved { color: var(--green); }
+  .bench-delta.increased { color: var(--amber); }
+  .bench-footnote { color: var(--muted); font-size: 12px; margin-top: 12px; }
+  .bench-reference-title { font-size: 12px; color: var(--muted); margin: 26px 0 12px; letter-spacing: .06em; text-transform: uppercase; }
+  .bench-references { display: grid; grid-template-columns: 1fr; gap: 14px; }
+  .bench-reference { display: flex; align-items: center; justify-content: space-between; gap: 20px; border: 1px solid var(--border); background: var(--bg-soft); border-radius: 12px; padding: 16px 20px; }
+  .bench-reference h3 { font-size: 14px; margin: 0; }
+  .bench-reference .ref-values { display: flex; flex-wrap: wrap; gap: 14px 24px; }
+  .ref-values span { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+  .bench-reference p { font-size: 11px; color: var(--muted); margin-top: 10px; }
+  .bench-status { padding: 22px; color: var(--muted); text-align: center; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+  @media (max-width: 760px) {
+    .bench-toolbar label { width: auto; flex: 1; min-width: 130px; }
+    .bench-references { grid-template-columns: 1fr; }
+    .bench-table th button, .bench-table td { padding: 13px 12px; }
+    .bench-number small { display: block; margin-top: 4px; }
+  }
+  @media (max-width: 480px) {
+    .bench-table th button { padding: 12px 8px; font-size: 10px; flex-direction: column; gap: 3px; align-items: flex-start; }
+    .bench-table td { padding: 13px 8px; }
+    .bench-model { font-size: 11px; overflow-wrap: anywhere; }
+    .bench-number, .bench-delta { font-size: 11px; }
+    .bench-number small { font-size: 9px; }
+  }
 
   /* ---------- quickstart ---------- */
-  .qs-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .qs-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .qs-note { color: var(--muted); font-size: 13px; line-height: 1.8; margin-top: 18px; }
+  .qs-note a { color: var(--green); }
   @media (max-width: 900px) { .qs-grid { grid-template-columns: 1fr; } }
   .qs-card { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; display: flex; flex-direction: column; }
   .qs-card .qs-head { padding: 16px 20px 0; display: flex; align-items: center; gap: 10px; }
@@ -338,12 +354,12 @@
   <div class="hero-badges">
     <span class="pill"><span class="dot"></span> System One decision model</span>
     <span class="pill"><b>SUMO</b> ≥ 1.20</span>
-    <span class="pill"><b>Python</b> 3.10+</span>
+    <span class="pill"><b>Python</b> 3.11+</span>
   </div>
   <h1>Traffic signals,<br><span class="grad">one typed call</span> at a time.</h1>
   <p class="hero-sub">
-    JevLight runs traffic signal control on <b>Jev</b>, the System One decision model — the whole road network decides in a
-    <code>single API call per control step</code>. One request sends a state plus a map of typed questions; every answer comes
+    JevLight runs traffic signal control on <b>Jev</b>, the System One decision model — each active intersection decides in its own
+    <code>API call per control step</code>. One request sends a state plus a map of typed questions; every answer comes
     back typed, with probabilities and confidence. Pure-text prompts, millisecond-scale decisions.
   </p>
   <div class="hero-ctas">
@@ -355,12 +371,6 @@
       <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
       View on GitHub
     </a>
-  </div>
-  <div class="hero-stats">
-    <div><div class="num n-green">1</div><div class="lbl">request per control step, whole network</div></div>
-    <div><div class="num n-amber">12<span class="u"> ints</span></div><div class="lbl">Jinan intersections packed into one state</div></div>
-    <div><div class="num n-green">ms<span class="u">-scale</span></div><div class="lbl">local decisions via logit readout</div></div>
-    <div><div class="num n-blue">4</div><div class="lbl">SUMO scenarios, up to 196 intersections</div></div>
   </div>
 </header>
 
@@ -399,7 +409,7 @@
   <div class="map-grid reveal">
     <div class="map-col">
       <div class="map-head">Traffic control</div>
-      <div class="map-card"><div class="t">Intersection snapshot</div><div class="d">Queue lengths, approaching vehicles by segment, waiting times — one intersection or the whole network.</div></div>
+      <div class="map-card"><div class="t">Intersection snapshot</div><div class="d">Queue lengths, approaching vehicles by segment, waiting times — the target intersection and its direct neighbours.</div></div>
       <div class="map-card"><div class="t">"Which phase next?"</div><div class="d">ETWT / NTST / ELWL / NLSL — which signal phase should serve next, per junction.</div></div>
       <div class="map-card"><div class="t">"Is this junction congested?"</div><div class="d">A speculative question logged for analysis, riding along for free in the same request.</div></div>
       <div class="map-card"><div class="t">The decision</div><div class="d">Chosen phase applied to SUMO via traci; every alternative stays visible for analysis.</div></div>
@@ -412,7 +422,7 @@
     </div>
     <div class="map-col">
       <div class="map-head">Jev API</div>
-      <div class="map-card"><div class="t"><code style="color:var(--green)">state</code> (JSON)</div><div class="d">Every active intersection packed into one shared state — <code>network packaging</code>, one request per control step.</div></div>
+      <div class="map-card"><div class="t"><code style="color:var(--green)">state</code> (JSON)</div><div class="d">Target intersection and direct upstream/downstream neighbours — current state only, one request per active junction.</div></div>
       <div class="map-card"><div class="t"><code style="color:var(--green)">choice</code> question</div><div class="d">One per intersection; the phases are the criteria. Jev evaluates all questions in parallel.</div></div>
       <div class="map-card"><div class="t"><code style="color:var(--green)">noul</code> question</div><div class="d">Speculative question in the same request — extra questions barely change latency.</div></div>
       <div class="map-card"><div class="t"><code style="color:var(--green)">answers.&lt;id&gt;</code></div><div class="d"><code>.choice</code> / <code>.probabilities</code> / <code>.confidence</code> — a typed answer, full distribution, calibrated confidence.</div></div>
@@ -428,8 +438,8 @@
   <div class="feat-grid reveal">
     <div class="feat">
       <div class="ico" style="background:rgba(61,220,132,0.1); border-color:rgba(61,220,132,0.3);">⚡</div>
-      <h3>One call per control step</h3>
-      <p>Network packaging sends every active intersection in one shared state — the whole road network decides in a single request, so extra junctions barely move the latency needle.</p>
+      <h3>One call per active junction</h3>
+      <p>Each active intersection receives one request with its own current state and its direct upstream/downstream neighbours. Requests do not expand to the whole road network.</p>
     </div>
     <div class="feat">
       <div class="ico" style="background:rgba(255,197,49,0.1); border-color:rgba(255,197,49,0.3);">🎯</div>
@@ -444,7 +454,7 @@
     <div class="feat">
       <div class="ico" style="background:rgba(255,93,93,0.1); border-color:rgba(255,93,93,0.3);">🧭</div>
       <h3>Two agent modes</h3>
-      <p><code>jevlight</code> — one agent per intersection with a purely local view; <code>cojevlight</code> (default) — a single network-level agent coordinating every junction in one request. Same Jev interface, two request patterns.</p>
+      <p><code>jevlight</code> — one agent per intersection with a purely local view; <code>cojevlight</code> (default) — one agent per intersection using its own state and direct upstream/downstream neighbours. Same Jev interface, two observation scopes.</p>
     </div>
     <div class="feat">
       <div class="ico" style="background:rgba(61,220,132,0.1); border-color:rgba(61,220,132,0.3);">🌐</div>
@@ -483,68 +493,95 @@
   </div>
 </section>
 
-<section id="benchmarks">
+<section id="benchmarks" aria-labelledby="benchmark-title">
   <div class="sec-head reveal">
-    <div class="sec-tag">Benchmarks</div>
-    <h2>Jinan 3×4 · 3,600s horizon</h2>
-    <p class="bench-note">
-      Baseline comparison produced by the CityFlow-based benchmark harness of this repository
-      (<code>results/benchmark_jinan.json</code>). Lower is better · AT = avg travel time (s) · AW = avg waiting time (s) · AQ = avg queue.
-    </p>
+    <div class="sec-tag">Benchmarks · SUMO</div>
+    <h2 id="benchmark-title">Traffic control performance</h2>
+    <p class="sec-desc">JevLight and CoJevLight across Jinan, Hangzhou and New York.</p>
   </div>
-  <div class="table-scroll reveal">
-    <table class="bench-table" id="bench-table">
-      <thead>
-        <tr><th>Controller</th><th style="width:34%">Avg travel time (s)</th><th>Avg waiting (s)</th><th>Avg queue</th></tr>
-      </thead>
-      <tbody></tbody>
-    </table>
+  <div class="bench-toolbar">
+    <label for="bench-flow">Traffic flow<select id="bench-flow" disabled><option>Loading…</option></select></label>
+    <label for="bench-metric">Metric<select id="bench-metric"><option value="att">Travel time · ATT (s)</option><option value="awt">Waiting time · AWT (s)</option><option value="aql">Queue length · AQL</option></select></label>
   </div>
+  <p class="bench-context" id="bench-context" role="status" aria-live="polite">Loading results…</p>
+  <table class="bench-table" id="bench-table">
+    <caption class="sr-only" id="bench-caption">JevLight and CoJevLight comparison</caption>
+    <thead><tr>
+      <th scope="col"><button type="button" data-sort="model">Model<span class="sort-arrow" aria-hidden="true">↕</span></button></th>
+      <th scope="col"><button type="button" data-sort="jevlight">JevLight<span class="sort-arrow" aria-hidden="true">↕</span></button></th>
+      <th scope="col" aria-sort="ascending"><button type="button" data-sort="cojevlight">CoJevLight<span class="sort-arrow" aria-hidden="true">↑</span></button></th>
+      <th scope="col"><button type="button" data-sort="delta" title="Percentage change from JevLight; negative values are better">Δ Co<span class="sort-arrow" aria-hidden="true">↕</span></button></th>
+    </tr></thead>
+    <tbody><tr><td colspan="4" class="bench-status">Loading results…</td></tr></tbody>
+  </table>
+  <p class="bench-footnote">Mean ± standard deviation over three seeds · 3,600 s simulation · Lower is better. Δ Co is relative to JevLight.</p>
+  <div class="bench-reference-title">Baseline</div>
+  <div class="bench-references" id="bench-references"></div>
+  <p class="bench-footnote" id="bench-metric-note"></p>
+  <noscript><p class="bench-footnote">Enable JavaScript to view the benchmark tables.</p></noscript>
 </section>
 
 <section id="quickstart">
   <div class="sec-head reveal">
     <div class="sec-tag">Quick start</div>
     <h2>From zero to signal control</h2>
-    <p class="sec-desc">
-      Requirements: Python 3.10+, SUMO ≥ 1.20 with <code>traci</code> / <code>sumolib</code> on <code>PYTHONPATH</code> or pip-installed (<code>eclipse-sumo</code>).
-    </p>
+    <p class="sec-desc">Prepare a model, start its service, and select an experiment configuration. This example uses Laya; each model has its own serving profile and environment.</p>
   </div>
   <div class="qs-grid reveal">
     <div class="qs-card">
       <div class="qs-head"><span class="step">1</span><span class="t">Clone &amp; install</span><button class="copy-btn" data-copy="qs1">copy</button></div>
-      <p>SUMO runtime plus the Python dependencies.</p>
-      <pre id="qs1"><span class="c"># pip install eclipse-sumo   # if SUMO is not installed yet</span>
-pip install -r requirements.txt</pre>
+      <p>Install Python 3.11+ and uv, then create the project environment with SUMO.</p>
+      <pre id="qs1">git clone https://github.com/usail-hkust/JevLight.git
+cd JevLight
+uv sync --locked --extra sumo --extra preparation</pre>
     </div>
     <div class="qs-card">
-      <div class="qs-head"><span class="step">2</span><span class="t">Dry run — no model at all</span><button class="copy-btn" data-copy="qs2">copy</button></div>
-      <p>Classic MaxPressure baseline: entirely local, zero API calls.</p>
-      <pre id="qs2">python run_jevlight.py <span class="k">--dry_run</span> <span class="k">--count</span> 3600</pre>
+      <div class="qs-head"><span class="step">2</span><span class="t">Prepare a model</span><button class="copy-btn" data-copy="qs2">copy</button></div>
+      <p>Laya example: download weights and author sources, then install its model environment.</p>
+      <pre id="qs2">uv run --locked --extra preparation python \
+  scripts/model_downloads/download.py --models laya
+uv run --locked python scripts/model_downloads/fetch_sources.py
+uv sync --locked \
+  --project scripts/model_downloads/environments/encoder</pre>
     </div>
     <div class="qs-card">
-      <div class="qs-head"><span class="step">3</span><span class="t">Watch it in 3D</span><button class="copy-btn" data-copy="qs3">copy</button></div>
-      <p>Opens the browser on the run's live simulation.</p>
-      <pre id="qs3">python run_jevlight.py <span class="k">--dry_run</span> <span class="k">--dataset</span> jinan <span class="k">--visualize</span></pre>
+      <div class="qs-head"><span class="step">3</span><span class="t">Start the model service</span><button class="copy-btn" data-copy="qs3">copy</button></div>
+      <p>Set weights_path in serving.toml to your prepared model. Keep this terminal running.</p>
+      <pre id="qs3">uv run --locked \
+  --project scripts/model_downloads/environments/encoder \
+  python -m scripts.experiments.serve_decision_model \
+  --config config/laya/serving.toml \
+  --request-log results/laya/requests.jsonl \
+  --batch-runtime native</pre>
     </div>
     <div class="qs-card">
-      <div class="qs-head"><span class="step">4</span><span class="t">Community endpoint</span><button class="copy-btn" data-copy="qs4">copy</button></div>
-      <p>Real Jev decisions — one request per control step.</p>
-      <pre id="qs4"><span class="k">export</span> JEV_API_KEY=jev_...
-python run_jevlight.py <span class="k">--dataset</span> jinan <span class="k">--count</span> 900</pre>
+      <div class="qs-head"><span class="step">4</span><span class="t">Run JevLight</span><button class="copy-btn" data-copy="qs4">copy</button></div>
+      <p>In another terminal, inspect the selected JSON, then run it with whole-step batch requests.</p>
+      <pre id="qs4">uv run --locked python run_jevlight.py \
+  --config config/laya/jevlight_jinan-1_s1.json \
+  --jev_batch_size 196 --print_config
+uv run --locked --extra sumo python run_jevlight.py \
+  --config config/laya/jevlight_jinan-1_s1.json \
+  --jev_batch_size 196</pre>
     </div>
     <div class="qs-card">
-      <div class="qs-head"><span class="step">5</span><span class="t">Open local model</span><button class="copy-btn" data-copy="qs5">copy</button></div>
-      <p>Any Jev-compatible checkpoint on vLLM — no key, no pacing.</p>
-      <pre id="qs5">scripts/serve_jev.sh <span class="k">--model</span> tev1
-python run_jevlight.py <span class="k">--jev_transport</span> local <span class="k">--count</span> 900</pre>
+      <div class="qs-head"><span class="step">5</span><span class="t">Compare CoJevLight</span><button class="copy-btn" data-copy="qs5">copy</button></div>
+      <p>Use the matching Co configuration to add direct-neighbour context under the same traffic condition.</p>
+      <pre id="qs5">uv run --locked --extra sumo python run_jevlight.py \
+  --config config/laya/cojevlight_jinan-1_s1.json \
+  --jev_batch_size 196</pre>
     </div>
     <div class="qs-card">
-      <div class="qs-head"><span class="step">6</span><span class="t">Switch to per-intersection</span><button class="copy-btn" data-copy="qs6">copy</button></div>
-      <p>The jevlight agent mode plus rolling evaluation.</p>
-      <pre id="qs6">python run_jevlight.py <span class="k">--agent</span> jevlight <span class="k">--count</span> 3600 <span class="k">--rolling_evaluation</span></pre>
+      <div class="qs-head"><span class="step">6</span><span class="t">Or use Jev API</span><button class="copy-btn" data-copy="qs6">copy</button></div>
+      <p>Use the official API with an environment-variable key. Model preparation and a local service are unnecessary.</p>
+      <pre id="qs6">export TYPESAFE_API_KEY=&quot;your-api-key&quot;
+uv run --locked --extra sumo python run_jevlight.py \
+  --jev_transport official --agent jevlight \
+  --dataset jinan --count 3600</pre>
     </div>
   </div>
+  <p class="qs-note">Choose traffic, mode and seed in <code>config/&lt;model&gt;/*.json</code>, and match <code>jev_base_url</code> to your running service. Batch requests use <code>--jev_batch_size 196</code>; the backend adjusts GPU chunk size to available memory. Add <code>--visualize</code> for the 3D viewer.</p>
+  <p class="qs-note">Using another model or existing downloads? See <a href="https://github.com/usail-hkust/JevLight/blob/main/scripts/model_downloads/README.md">model preparation</a> for the required environment, runtime, complete backbones and manifest layout, or the <a href="https://github.com/usail-hkust/JevLight/blob/main/README.md#native-decision-models-and-batch-inference">full setup guide</a>.</p>
 </section>
 
 <section id="datasets">
@@ -580,39 +617,8 @@ python run_jevlight.py <span class="k">--jev_transport</span> local <span class=
   </div>
 </footer>
 
+<script src="assets/benchmark.js" defer></script>
 <script>
-  // ----- benchmark table -----
-  const BENCH = [
-    { name: "Laya-typed-decisions-local", own: true,  tt: 303.87, aw: 47.36, aq: 191.39 },
-    { name: "Qwen2.5-7B-Instruct",        own: false, tt: 312.47, aw: 25.34, aq: 189.14 },
-    { name: "Jev-API-revised-prompt",     own: true,  tt: 312.75, aw: 47.76, aq: 206.20 },
-    { name: "MaxPressure",                own: false, tt: 317.51, aw: 30.76, aq: 199.68 },
-    { name: "MPLight",                    own: false, tt: 439.62, aw: 26.49, aq: 391.74 },
-    { name: "Fixedtime-30",               own: false, tt: 451.45, aw: 50.70, aq: 431.37 },
-    { name: "DynamicLight",               own: false, tt: 568.30, aw: 92.07, aq: 609.80 },
-    { name: "Random",                     own: false, tt: 594.16, aw: 35.55, aq: 630.59 },
-    { name: "PressLight",                 own: false, tt: 630.93, aw: 41.33, aq: 697.76 },
-    { name: "CoLight",                    own: false, tt: 750.91, aw: 51.12, aq: 866.49 },
-  ];
-  const bestTT = Math.min(...BENCH.map(r => r.tt));
-  const bestAW = Math.min(...BENCH.map(r => r.aw));
-  const bestAQ = Math.min(...BENCH.map(r => r.aq));
-  const maxTT = Math.max(...BENCH.map(r => r.tt));
-  const fmt = v => v.toFixed(v < 100 ? 2 : 1);
-  const tbody = document.querySelector("#bench-table tbody");
-  tbody.innerHTML = BENCH.map(r => `
-    <tr>
-      <td class="ctrl">${r.name}${r.own ? '<span class="own">JevLight path</span>' : ""}</td>
-      <td class="bar-cell">
-        <div style="display:flex;align-items:center;gap:12px;">
-          <div class="bar-wrap"><div class="bar ${r.tt === bestTT ? "best" : r.own ? "own" : "rest"}" data-w="${(r.tt / maxTT * 100).toFixed(1)}"></div></div>
-          <span class="num-cell" style="min-width:52px;${r.tt === bestTT ? "color:var(--green);font-weight:700;" : ""}">${fmt(r.tt)}</span>
-        </div>
-      </td>
-      <td class="num-cell ${r.aw === bestAW ? "best-val" : ""}">${fmt(r.aw)}</td>
-      <td class="num-cell ${r.aq === bestAQ ? "best-val" : ""}">${fmt(r.aq)}</td>
-    </tr>`).join("");
-
   // ----- reveal on scroll -----
   const io = new IntersectionObserver(entries => {
     for (const e of entries) if (e.isIntersecting) {

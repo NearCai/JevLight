@@ -1,0 +1,6 @@
+model_id = "wfzyx/von"
+family = "von"
+weights_path = ".local/models/von/weights"
+max_length = 8192
+host = "127.0.0.1"
+port = 8123

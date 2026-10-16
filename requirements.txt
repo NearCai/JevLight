@@ -1,8 +1,11 @@
+# Compatibility list; pyproject.toml and uv.lock are authoritative.
 # Core simulation + decision stack
 numpy
 pandas
 requests
 tqdm
+traci>=1.20
+sumolib>=1.20
 
 # SUMO runtime: either install eclipse-sumo from pip or set SUMO_HOME
 # to a SUMO >= 1.20 installation providing traci/sumolib.
@@ -14,6 +17,9 @@ typesafe-sdk
 
 # Optional experiment tracking
 # wandb>=0.19,<1.0
+
+# Optional preparation tooling (uv sync --locked --extra preparation)
+# tokenizers==0.22.2
 
 # Development
 pytest

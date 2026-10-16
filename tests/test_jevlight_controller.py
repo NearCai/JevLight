@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
+
 from typing import Any, List, Mapping
 
 import pytest
+from types import SimpleNamespace
+from pathlib import Path
 
 from jevlight.controller import (
+    AGENT_MODE_DEFAULTS,
     CONGESTION_QUESTION_PREFIX,
     JevLightController,
     PHASE_QUESTION_PREFIX,
@@ -14,6 +19,7 @@ from jevlight.controller import (
     jev_intersection_state,
     jevlight_phase_question,
     phase_criteria,
+    cojevlight_phase_question,
 )
 from jevlight.jev_client import (
     JevClient,
@@ -25,6 +31,9 @@ from jevlight.observation import (
     IntersectionObservation,
     LaneObservation,
     rank_phases,
+    ALL_LANES,
+    attach_lane_relations,
+    collect_observations,
 )
 
 
@@ -158,7 +167,7 @@ class TestNetworkPackaging:
                 )
             ]
         )
-        controller = JevLightController(client, 15, packaging="network")
+        controller = JevLightController(client, 15, packaging="network", agent_mode="jevlight", speculative=False)
         actions, traces = controller.decide(observations, step=0)
 
         assert len(client.requests) == 1
@@ -168,7 +177,6 @@ class TestNetworkPackaging:
         # Questions exist only for the active intersection.
         assert set(request["questions"]) == {
             f"{PHASE_QUESTION_PREFIX}i0",
-            f"{CONGESTION_QUESTION_PREFIX}i0",
         }
         # The chosen phase maps back onto the SUMO phase list index.
         assert actions == {"i0": 0, "i1": PHASES.index("NT_ST")}
@@ -316,7 +324,7 @@ class TestPerIntersectionPackaging:
             ]
         )
         controller = JevLightController(
-            client, 15, packaging="per_intersection"
+            client, 15, packaging="per_intersection", speculative=False
         )
         actions, traces = controller.decide(observations, step=0)
         assert len(client.requests) == 2
@@ -324,8 +332,8 @@ class TestPerIntersectionPackaging:
             set(request["questions"]) for request in client.requests
         ]
         assert per_request_ids == [
-            {f"{PHASE_QUESTION_PREFIX}i0", f"{CONGESTION_QUESTION_PREFIX}i0"},
-            {f"{PHASE_QUESTION_PREFIX}i1", f"{CONGESTION_QUESTION_PREFIX}i1"},
+            {f"{PHASE_QUESTION_PREFIX}i0"},
+            {f"{PHASE_QUESTION_PREFIX}i1"},
         ]
         for request in client.requests:
             state = request["state"]
@@ -456,3 +464,295 @@ class TestConfigValidation:
     def test_invalid_transport_rejected(self):
         with pytest.raises(ValueError):
             JevClient(transport="carrier-pigeon", api_key="k")
+
+
+class FakeLaneNetwork:
+    """SUMO's lane connection surface with independently specified routes."""
+
+    def __init__(self, routes):
+        self.routes = routes
+
+    def getLane(self, lane_id):
+        connections = [
+            SimpleNamespace(
+                getDirection=lambda direction=direction: direction,
+                getToLane=lambda target=target: SimpleNamespace(getID=lambda: target),
+            )
+            for direction, target in self.routes.get(lane_id, [])
+        ]
+        return SimpleNamespace(getOutgoing=lambda: connections)
+
+
+def connected_observations():
+    a, b, c = [make_observation(name) for name in ("a", "b", "c")]
+    a.neighbours = ["c"]  # Geometry would incorrectly suggest c.
+    a.lanes["ET"].physical_lanes = ["a_in_0"]
+    a.lanes["EL"].physical_lanes = ["a_in_0"]  # Shared physical lane.
+    b.lanes["WT"].physical_lanes = ["b_in_0"]
+    b.lanes["WL"].physical_lanes = ["b_in_0"]
+    c.lanes["WR"].physical_lanes = ["c_in_0"]
+    net = FakeLaneNetwork({
+        "a_in_0": [("s", "b_in_0"), ("s", "b_in_0"), ("l", "external_0")],
+        "c_in_0": [("r", "b_in_0")],
+    })
+    attach_lane_relations(SimpleNamespace(sumo_net=net), [a, b, c])
+    return a, b, c
+
+
+class TestCooperativeInput:
+    def test_topology_preserves_branching_turns_boundaries_and_reciprocity(self):
+        a, b, c = connected_observations()
+        assert a.neighbours == ["b"]
+        assert a.topology_available
+        assert a.lane_relations["ET"]["downstream"] == [
+            {"intersection_id": "b", "lane": "WL"},
+            {"intersection_id": "b", "lane": "WT"},
+        ]
+        # A left-turn has an external destination, never its straight receiver.
+        assert a.lane_relations["EL"]["downstream"] == []
+        assert b.lane_relations["WT"]["upstream"] == [
+            {"intersection_id": "a", "lane": "ET"},
+            {"intersection_id": "c", "lane": "WR"},
+        ]
+        assert c.lane_relations["WR"]["downstream"] == a.lane_relations["ET"]["downstream"]
+
+    def test_missing_network_is_unknown_not_empty_known_topology(self):
+        obs = make_observation()
+        attach_lane_relations(SimpleNamespace(), [obs])
+        assert not obs.topology_available
+        assert obs.lane_relations == {}
+
+    def test_cold_start_does_not_invent_cooperation_from_topology(self):
+        observations = connected_observations()
+        client = StubJevClient()
+        controller = JevLightController(client, 15)
+        controller.decide(observations, 0)
+        assert controller.packaging == "per_intersection"
+        assert len(client.requests) == 3
+        for request in client.requests:
+            state = request["state"]
+            target = state["intersection_id"]
+            assert state["cooperative_view"] == {}
+            assert state["cooperation_source"] == "observed_vehicle_transitions"
+            for field in ("lane_relations", "topology_available", "related_intersections", "neighbours", "intersections"):
+                assert field not in state
+            assert set(request["questions"]) == {f"phase_{target}"}
+            assert set(request["questions"][f"phase_{target}"]["criteria"]) == set(CANONICAL_PHASES)
+            assert set(state["lanes"]) == set(ALL_LANES)
+
+    @pytest.mark.parametrize("mode", ["cojevlight", "collmlight"])
+    def test_network_packaging_is_rejected_for_cooperative_mode(self, mode):
+        with pytest.raises(ValueError, match="requires per_intersection"):
+            JevLightController(StubJevClient(), 15, agent_mode=mode, packaging="network")
+
+    def test_learned_view_uses_latest_state_filters_empty_and_excludes_history(self):
+        a, b, c = connected_observations()
+        a.lanes["ET"].occupancy = b.lanes["WT"].occupancy = .2
+        a.lanes["ET"].vehicles = {"vehicle_fixture_927": 0}
+        client = StubJevClient()
+        controller = JevLightController(client, 15)
+        controller.decide([a, b, c], 0)
+        a.lanes["ET"].vehicles = {}
+        b.lanes["WT"].vehicles = {"vehicle_fixture_927": 0}
+        b.lanes["WT"].queue = 17
+        controller.decide([a, b, c], 1)
+        latest = client.requests[-3:]
+        state = next(r["state"] for r in latest if r["state"]["intersection_id"] == "a")
+        entry, = state["cooperative_view"]["ET"]["downstream"]
+        assert (entry["intersection_id"], entry["lane"]) == ("b", "WT")
+        assert entry["state"]["queue"] == 17
+        assert set(entry) == {"intersection_id", "lane", "current_phase", "state"}
+        assert state["cooperative_view"]["ET"]["upstream"] == []
+        assert controller.trajectory_relations.matched_transitions == 1
+        for request in latest:
+            for field in ("history", "sampled_transition_count", "selected_phase", "vehicle_fixture_927"):
+                assert field not in json.dumps(request)
+        fresh = StubJevClient()
+        JevLightController(fresh, 15).decide([a, b, c], 1)
+        assert fresh.requests[0]["state"]["cooperative_view"]["ET"]["downstream"] == []
+        b.lanes["WT"].occupancy = 0
+        b.empty = True
+        controller.decide([a, b, c], 2)
+        state = next(r["state"] for r in client.requests[-2:] if r["state"]["intersection_id"] == "a")
+        assert state["cooperative_view"]["ET"]["downstream"] == []
+        # Filtering current state does not erase the learned association.
+        assert controller.trajectory_relations.related(("a", "ET"), "downstream") == [("b", "WT")]
+
+    @pytest.mark.parametrize("steps", [-1, 1, 5])
+    def test_history_cannot_be_reenabled(self, steps):
+        with pytest.raises(ValueError, match="current state only"):
+            JevLightController(StubJevClient(), 15, cojev_history_steps=steps)
+
+    def test_zero_history_and_local_mode_keep_requests_local(self):
+        obs = make_observation()
+        client = StubJevClient()
+        controller = JevLightController(client, 15, speculative=False, cojev_history_steps=0)
+        controller.decide([obs], 0)
+        controller.decide([obs], 1)
+        assert "history" not in client.requests[-1]["state"]
+        local_client = StubJevClient()
+        JevLightController(local_client, 15, agent_mode="jevlight", packaging="per_intersection", speculative=False).decide([obs], 0)
+        assert "lane_relations" not in local_client.requests[0]["state"]
+        assert set(local_client.requests[0]["state"]["lanes"]) == set(obs.lanes) - {"NR", "SR", "ER", "WR"}
+
+    def test_direction_definitions_and_switch_cost_are_consistent(self):
+        obs = make_observation()
+        criteria = phase_criteria(obs)
+        for phase, descriptions in {
+            "ETWT": ("ET = through lanes arriving from the east", "WT = through lanes arriving from the west"),
+            "NTST": ("NT = through lanes arriving from the north", "ST = through lanes arriving from the south"),
+            "ELWL": ("EL = left-turn lanes arriving from the east", "WL = left-turn lanes arriving from the west"),
+        }.items():
+            for description in descriptions:
+                assert description in criteria[phase]
+        state = jev_intersection_state(obs, 15)
+        assert (state["yellow_time_s"], state["green_time_if_switch_s"]) == (5, 10)
+        question = cojevlight_phase_question(obs, 15, "$")
+        for field in ("cooperative_view", "latest current state", "yellow_time_s", "occupancy"):
+            assert field in question["instructions"]
+        assert "no reasoning text" in question["instructions"]
+
+    def test_movement_statistics_cover_all_physical_lanes(self):
+        intersection = SimpleNamespace(inter_id="a", inter_name="a", adjacency_info={})
+        env = SimpleNamespace(
+            list_intersection=[intersection],
+            intersection_dict={"a": {"roads": {"in": {
+                "type": "incoming", "location": "North", "length": 90,
+                "lanes": {"go_straight": [0, 1]},
+            }}}},
+            dic_traffic_env_conf={"YELLOW_TIME": 4},
+            waiting_vehicle_list={"x": 10, "y": 30},
+            get_lane_waiting_vehicle_count=lambda: {"in_0": 1, "in_1": 1},
+            get_lane_vehicles=lambda: {"in_0": ["x"], "in_1": ["y"]},
+            get_vehicle_distance=lambda: {"x": 88, "y": 87},
+            get_vehicle_speed=lambda: {"x": 0, "y": 0},
+        )
+        obs = collect_observations(env)[0]
+        assert obs.lanes["NT"].queue == 2
+        assert obs.lanes["NT"].avg_wait == 20
+        assert obs.lanes["NT"].occupancy == .1  # 2 / (2 lanes * 10 vehicles).
+        assert obs.yellow_time == 4
+        assert obs.lanes["NT"].physical_lanes == ["in_0", "in_1"]
+
+
+@pytest.mark.parametrize("relative_path, junction_count", [
+    ("data/Jinan/3_4/roadnet_3_4.net.xml", 12),
+    ("data/Hangzhou/4_4/roadnet_4_4.net.xml", 16),
+    ("data/NewYork/28_7/roadnet_28_7.net.xml", 196),
+])
+def test_real_sumo_four_phase_directions_and_cooperative_connections(relative_path, junction_count):
+    """Verify named green phases against lane geometry, without starting SUMO."""
+    import xml.etree.ElementTree as ET
+    import sumolib
+    from utils.sumo_env import Intersection
+
+    path = Path(__file__).resolve().parents[1] / relative_path
+    net = sumolib.net.readNet(str(path))
+    observations = []
+    lane_codes = {}
+    for tls in net.getTrafficLights():
+        node = net.getNode(tls.getID())
+        intersection = Intersection.__new__(Intersection)
+        x, y = node.getCoord()
+        intersection.point = {"x": x, "y": y}
+        intersection.incoming_roads = {edge.getID(): edge for edge in node.getIncoming()}
+        intersection.outgoing_roads = {edge.getID(): edge for edge in node.getOutgoing()}
+        intersection.road_id_2_orient = {}
+        intersection._calculate_road_orientations()
+        lanes = {name: LaneObservation() for name in ALL_LANES}
+        for edge in node.getIncoming():
+            side = intersection.road_id_2_orient["incoming"][edge.getID()]
+            for physical in edge.getLanes():
+                lane_codes[physical.getID()] = side
+                for connection in physical.getOutgoing():
+                    suffix = {"s": "T", "l": "L", "L": "L", "r": "R", "R": "R"}.get(connection.getDirection())
+                    if suffix:
+                        lane = lanes[side + suffix]
+                        if physical.getID() not in lane.physical_lanes:
+                            lane.physical_lanes.append(physical.getID())
+                            lane.road_length = edge.getLength()
+        observations.append(IntersectionObservation(tls.getID(), lanes, list(CANONICAL_PHASES)))
+
+    # XML's actual green connection indices are independent of phase-name parsing.
+    root = ET.parse(path).getroot()
+    controlled = {}
+    for connection in root.findall("connection"):
+        suffix = {"s": "T", "l": "L", "L": "L"}.get(connection.get("dir"))
+        if connection.get("tl") and suffix:
+            physical = f'{connection.get("from")}_{connection.get("fromLane")}'
+            key = (connection.get("tl"), int(connection.get("linkIndex")))
+            controlled.setdefault(key, set()).add(lane_codes[physical] + suffix)
+    checked = 0
+    for logic in root.findall("tlLogic"):
+        for phase in logic.findall("phase"):
+            name = phase.get("name")
+            if name not in CANONICAL_PHASES:
+                continue
+            actual = set()
+            for index, signal in enumerate(phase.get("state")):
+                if signal in "Gg":
+                    actual.update(controlled.get((logic.get("id"), index), set()))
+            assert actual == {name[:2], name[2:]}
+            checked += 1
+    assert checked == junction_count * 4
+
+    attach_lane_relations(SimpleNamespace(sumo_net=net), observations)
+    assert len(observations) == junction_count
+    by_id = {obs.intersection_id: obs for obs in observations}
+    for obs in observations:
+        assert obs.topology_available and obs.neighbours
+        for lane, sides in obs.lane_relations.items():
+            for ref in sides["downstream"]:
+                receiver = by_id[ref["intersection_id"]]
+                assert {"intersection_id": obs.intersection_id, "lane": lane} in receiver.lane_relations[ref["lane"]]["upstream"]
+                # Every declared route must have an actual lane connection of
+                # the source movement's turn type into the receiver group.
+                assert any(
+                    connection.getToLane().getID() in receiver.lanes[ref["lane"]].physical_lanes
+                    and {"s": "T", "l": "L", "L": "L", "r": "R", "R": "R"}.get(connection.getDirection()) == lane[1]
+                    for physical in obs.lanes[lane].physical_lanes
+                    for connection in net.getLane(physical).getOutgoing()
+                )
+
+    for obs in observations:
+        obs.empty = False
+    client = StubJevClient()
+    JevLightController(client, 15).decide(observations, 0)
+    assert len(client.requests) == junction_count
+    for request in client.requests:
+        state = request["state"]
+        assert "intersections" not in state
+        assert len(request["questions"]) == 1
+        assert state["cooperative_view"] == {}
+        assert "lane_relations" not in state
+
+
+
+@pytest.mark.parametrize("agent_mode", ["jevlight", "cojevlight"])
+@pytest.mark.parametrize("congestion_probability", [0.0, 1.0])
+def test_optional_congestion_shares_request_and_only_phase_answer_controls_signal(agent_mode, congestion_probability):
+    observation = make_observation("i0", queue_by_phase={"ETWT": 1})
+    client = StubJevClient(results=[JevResult(answers={
+        "phase_i0": phase_answer("ETWT"),
+        "congested_i0": {"type": "noul", "noul": congestion_probability},
+    })])
+    controller = JevLightController(client, 15, agent_mode=agent_mode,
+                                    **{**AGENT_MODE_DEFAULTS[agent_mode], "speculative": True})
+    actions, traces = controller.decide([observation], step=0)
+    assert len(client.requests) == 1
+    assert set(client.requests[0]["questions"]) == {"phase_i0", "congested_i0"}
+    assert actions["i0"] == PHASES.index("WT_ET")
+    assert traces[0]["congestion_noul"] == congestion_probability
+    assert traces[0]["fallback"] is None
+
+
+@pytest.mark.parametrize("agent_mode", ["jevlight", "cojevlight"])
+def test_default_modes_send_only_phase_question(agent_mode):
+    observation = make_observation("i0", queue_by_phase={"ETWT": 1})
+    client = StubJevClient(results=[JevResult(answers={"phase_i0": phase_answer("ETWT")})])
+    controller = JevLightController(client, 15, agent_mode=agent_mode,
+                                    **AGENT_MODE_DEFAULTS[agent_mode])
+    actions, traces = controller.decide([observation], step=0)
+    assert set(client.requests[0]["questions"]) == {"phase_i0"}
+    assert actions["i0"] == PHASES.index("WT_ET")
+    assert traces[0]["congestion_noul"] is None

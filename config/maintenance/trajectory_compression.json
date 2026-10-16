@@ -1,0 +1,5 @@
+{
+  "interval": 600,
+  "min_age": 300,
+  "compression_level": 3
+}

@@ -1,0 +1,12 @@
+{
+  "dry_run": true,
+  "dataset": "jinan",
+  "traffic_file": "anon_3_4_jinan_real.rou.xml",
+  "memo": "jinan",
+  "count": 3600,
+  "duration": 15,
+  "seed": 1,
+  "rolling_evaluation": true,
+  "hourly_interval": 3600,
+  "use_wandb": false
+}

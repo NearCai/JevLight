@@ -58,6 +58,7 @@ class LaneObservation:
     vehicles: Dict[str, int] = field(default_factory=dict)
     positions: Dict[str, float] = field(default_factory=dict)
     road_length: float = 0.0
+    physical_lanes: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -68,6 +69,9 @@ class IntersectionObservation:
     neighbours: List[str] = field(default_factory=list)
     empty: bool = True
     current_phase: Optional[str] = None
+    lane_relations: Dict[str, Dict[str, List[Dict[str, Any]]]] = field(default_factory=dict)
+    topology_available: bool = False
+    yellow_time: float = 5.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -96,8 +100,8 @@ def collect_observations(env: Any) -> List[IntersectionObservation]:
 
     LLMLight uses four non-uniform distance cells, later presented as three
     segments. CoLLMLight uses ten uniform moving/queued cells, vehicle identity,
-    per-lane position, road length and the original ``vehicles/(length//9)``
-    occupancy definition.
+    per-lane position and road length. Movement occupancy aggregates storage
+    across all its physical lanes using 9 metres per vehicle.
     """
     lane_queues = env.get_lane_waiting_vehicle_count()
     lane_vehicles = env.get_lane_vehicles()
@@ -128,10 +132,9 @@ def collect_observations(env: Any) -> List[IntersectionObservation]:
                     sum(lane_queues.get(lane_id, 0) for lane_id in physical_lanes)
                 )
 
-                # The source resets and overwrites the mean for each physical
-                # lane in a movement group; preserve that iteration behavior.
+                lane_observation.physical_lanes.extend(physical_lanes)
+                physical_waits: List[float] = []
                 for physical_lane in physical_lanes:
-                    physical_waits: List[float] = []
                     for vehicle_id in lane_vehicles.get(physical_lane, ()):
                         lane_position = road_length - float(
                             vehicle_distances.get(vehicle_id, 0.0)
@@ -152,14 +155,12 @@ def collect_observations(env: Any) -> List[IntersectionObservation]:
                             lane_observation.llmlight_cells[
                                 _llmlight_cell(lane_position, road_length)
                             ] += 1
-                    lane_observation.avg_wait = (
-                        sum(physical_waits) / len(physical_waits)
-                        if physical_waits
-                        else 0.0
-                    )
+                lane_observation.avg_wait = (
+                    sum(physical_waits) / len(physical_waits) if physical_waits else 0.0
+                )
 
                 lane_observation.approaching = float(sum(lane_observation.cells))
-                capacity = road_length // COLLMLIGHT_CAR_SPACING
+                capacity = (road_length // COLLMLIGHT_CAR_SPACING) * len(physical_lanes)
                 lane_observation.occupancy = (
                     len(lane_observation.positions) / capacity if capacity else 0.0
                 )
@@ -188,9 +189,68 @@ def collect_observations(env: Any) -> List[IntersectionObservation]:
                 neighbours=neighbours,
                 empty=empty,
                 current_phase=current_phase,
+                yellow_time=float(env.dic_traffic_env_conf.get("YELLOW_TIME", 5.0)),
             )
         )
+    attach_lane_relations(env, observations)
     return observations
+
+
+def attach_lane_relations(env: Any, observations: Sequence[IntersectionObservation]) -> None:
+    """Resolve possible inter-junction movements from SUMO lane connections.
+
+    A source movement's outgoing physical lane is another junction's incoming
+    lane. That lane can serve several destination movements; these are possible
+    destinations, not known routing proportions. Include right-turn feeders.
+    No geometric-neighbour or compass-based guesses are used.
+    """
+    net = getattr(env, "sumo_net", None)
+    if net is None:
+        for observation in observations:
+            observation.neighbours = []
+            observation.lane_relations = {}
+            observation.topology_available = False
+        return
+    destinations: Dict[str, List[Tuple[IntersectionObservation, str]]] = {}
+    for observation in observations:
+        observation.lane_relations = {
+            lane: {"upstream": [], "downstream": []} for lane in ALL_LANES
+        }
+        observation.topology_available = True
+        for lane_name, lane in observation.lanes.items():
+            for physical_lane in lane.physical_lanes:
+                destinations.setdefault(physical_lane, []).append((observation, lane_name))
+
+    suffixes = {"s": "T", "l": "L", "L": "L", "r": "R", "R": "R"}
+    for source in observations:
+        for lane_name, lane in source.lanes.items():
+            for physical_lane in lane.physical_lanes:
+                for connection in net.getLane(physical_lane).getOutgoing():
+                    if suffixes.get(connection.getDirection()) != lane_name[1]:
+                        continue
+                    receiving_lane = connection.getToLane().getID()
+                    for destination, destination_movement in destinations.get(receiving_lane, ()):
+                        if destination.intersection_id == source.intersection_id:
+                            continue
+                        downstream = {
+                            "intersection_id": destination.intersection_id,
+                            "lane": destination_movement,
+                        }
+                        upstream = {"intersection_id": source.intersection_id, "lane": lane_name}
+                        if downstream not in source.lane_relations[lane_name]["downstream"]:
+                            source.lane_relations[lane_name]["downstream"].append(downstream)
+                        if upstream not in destination.lane_relations[destination_movement]["upstream"]:
+                            destination.lane_relations[destination_movement]["upstream"].append(upstream)
+    for observation in observations:
+        observation.neighbours = sorted({
+            ref["intersection_id"]
+            for relations in observation.lane_relations.values()
+            for refs in relations.values()
+            for ref in refs
+        })
+        for relations in observation.lane_relations.values():
+            for refs in relations.values():
+                refs.sort(key=lambda ref: (ref["intersection_id"], ref["lane"]))
 
 
 def _effective_range(

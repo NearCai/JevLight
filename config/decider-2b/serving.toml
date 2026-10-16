@@ -1,0 +1,7 @@
+model_id = "Mapika/decider-2b"
+family = "decider"
+weights_path = ".local/models/decider-2b/weights"
+max_length = 262144
+max_state_tokens = 262144
+host = "127.0.0.1"
+port = 8123

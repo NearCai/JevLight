@@ -1,0 +1,7 @@
+model_id = "fastino/GLiNER2.5-Decide"
+family = "gliner2"
+weights_path = ".local/models/gliner2.5-decide/weights"
+max_length = 32768
+host = "127.0.0.1"
+port = 8123
+batch_size = 196

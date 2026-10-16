@@ -1,0 +1,86 @@
+{
+  "laya-multilingual": {
+    "model_id": "convaiinnovations/laya-multilingual",
+    "revision": "1720e3e3357cfe1e281542e223f8273b0890ca34"
+  },
+  "laya": {
+    "model_id": "convaiinnovations/laya",
+    "revision": "7b928d828b7b0e022f929d9bd2e44165aa270148"
+  },
+  "kev-0.8b": {
+    "model_id": "jaredpalmer/kev-0.8b",
+    "revision": "bf75a6a8848ea6960ff2ed108d9ed44c2941174f"
+  },
+  "kev-4b": {
+    "model_id": "jaredpalmer/kev-4b",
+    "revision": "6cfce5c2fa4b4bd64026336ab649c5ca78857d52"
+  },
+  "kev-9b": {
+    "model_id": "jaredpalmer/kev-9b",
+    "revision": "db029f08b290afd9fee4aa4bbcd9ae48602d1eb0"
+  },
+  "clef-flash": {
+    "model_id": "Cloudflare/clef-flash",
+    "revision": "fde727a287004204b7518dcc983fe64379776712"
+  },
+  "decider-2b": {
+    "model_id": "Mapika/decider-2b",
+    "revision": "533964dae8be954c5b5e19fa4948e48408094c1e"
+  },
+  "decider-4b": {
+    "model_id": "Mapika/decider-4b",
+    "revision": "eb5fbdfc9448473ec25e399882912863afbdb70e"
+  },
+  "bespoke-nimble-9b": {
+    "model_id": "bespokelabs/Bespoke-Nimble-9B",
+    "revision": "bd792f44ec8e265be861bfcdf4e05967ffe0e858"
+  },
+  "von": {
+    "model_id": "wfzyx/von",
+    "revision": "498ceba33390b32cfefaab6422ec380318ba9b99"
+  },
+  "valen-0.8b": {
+    "model_id": "Valen-Team/Valen-0.8B",
+    "revision": "3bf3e6d6318385884bf85e38dea1ca59afdf93f1"
+  },
+  "valen-2b": {
+    "model_id": "Valen-Team/Valen-2B",
+    "revision": "8106f4c18f91a96a23a7d6dc420ac6a6ff66e8a6"
+  },
+  "valen-4b": {
+    "model_id": "Valen-Team/Valen-4B",
+    "revision": "255ed2640730efdd5cbdb3d539165925f8f45e27"
+  },
+  "open-jev-2b": {
+    "model_id": "ZefanCai/Open-Jev-2B",
+    "revision": "0c7aa498b1627be8da4acf34c863ff0ee0a92785"
+  },
+  "open-jev-9b": {
+    "model_id": "ZefanCai/Open-Jev-9B",
+    "revision": "47e966881e489511c0c7f5633a9e1960a676a551"
+  },
+  "agent-jev": {
+    "model_id": "aimeigaoshou/agent-jev",
+    "revision": "0e2593e6e6c0eade0700712ac13c4389aa7654cc"
+  },
+  "gliner2.5-decide": {
+    "model_id": "fastino/GLiNER2.5-Decide",
+    "revision": "9d1bfb848cd16d93ee56ccbc59cd92bf0f284d90"
+  },
+  "lev": {
+    "model_id": "interfaze-ai/lev",
+    "revision": "7bdc748dffebd85b57ee0dbea8f994c6354fed31"
+  },
+  "kev-27b": {
+    "model_id": "jaredpalmer/kev-27b",
+    "revision": "af0e6d551bdc2cc724f3e9d7a8bee1cd4fb8f7bf"
+  },
+  "clef-27b": {
+    "model_id": "Cloudflare/clef",
+    "revision": "ed3eed331870db2eff4b0db01237128ede8a00ce"
+  },
+  "open-jev-27b": {
+    "model_id": "ZefanCai/Open-Jev-27B-v1.1",
+    "revision": "28cf73067d5b337860bbef3c85b8b82ba8730956"
+  }
+}

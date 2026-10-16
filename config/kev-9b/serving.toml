@@ -1,0 +1,11 @@
+model_id = "jaredpalmer/kev-9b"
+family = "kev"
+weights_path = ".local/models/kev-9b/weights"
+max_length = 73728
+host = "127.0.0.1"
+port = 8123
+max_state_tokens = 65536
+batch_kernel = "author"
+
+batch_backend = "author_fused"
+batch_fla_package_path = ".local/environments/open-jev-fla/batch_packages"

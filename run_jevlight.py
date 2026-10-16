@@ -7,7 +7,7 @@ the official TypeSafe API (``$TYPESAFE_API_KEY``), or a local Jev-compatible
 server serving open Jev-style models (``--jev_transport local``, started via
 ``scripts/serve_jev.sh``).  ``--agent`` selects the prompt and request
 pattern: ``jevlight`` (per-intersection agent, LLMLight prompt) or
-``cojevlight`` (network-level agent, CoLLMLight prompt, default).
+``cojevlight`` (per-intersection agent with direct neighbours, default).
 See ``jevlight/controller.py`` for the question design.
 
 Examples:
@@ -28,7 +28,7 @@ Examples:
 
     # ChatLight baseline request patterns on the same Jev interface:
     python run_jevlight.py --agent jevlight   # per-intersection agent
-    python run_jevlight.py --agent cojevlight # network-level agent (default)
+    python run_jevlight.py --agent cojevlight # target and direct neighbours (default)
 
     # MaxPressure baseline, no Jev calls at all:
     python run_jevlight.py --dry_run --count 3600
@@ -91,7 +91,13 @@ from jevlight.viz_server import (
 from jevlight.wandb_utils import safe_wandb_finish, safe_wandb_log, wandb_init_if_enabled
 
 
-def parse_args():
+def parse_bool(value):
+    if value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    raise argparse.ArgumentTypeError("expected true or false")
+
+
+def parse_args(argv=None):
     packaging_defaults = ", ".join(
         f"{mode}={defaults['packaging']}"
         for mode, defaults in AGENT_MODE_DEFAULTS.items()
@@ -99,6 +105,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Run JevLight signal control with a Jev decision model"
     )
+    parser.add_argument("--config", help="JSON experiment parameters in config/<model>/<experiment>.json")
+    parser.add_argument("--print_config", action="store_true", help="Print resolved parameters without running an experiment")
     parser.add_argument(
         "--jev_transport",
         choices=JEV_TRANSPORTS,
@@ -140,8 +148,8 @@ def parse_args():
     parser.add_argument(
         "--jev_timeout",
         type=float,
-        default=30.0,
-        help="Per-request timeout in seconds (default: 30)",
+        default=120.0,
+        help="Per-request timeout in seconds (default: 120)",
     )
     parser.add_argument(
         "--jev_retries",
@@ -165,12 +173,11 @@ def parse_args():
         default="cojevlight",
         help=(
             "Prompt and request pattern: jevlight = JevLight "
-            "per-intersection agent prompt, per_intersection packaging, no "
-            "congestion question; cojevlight = CoJevLight network-level "
-            "agent prompt, network packaging (default). llmlight and "
+            "per-intersection agent prompt, per_intersection packaging, with a "
+            "congestion question; cojevlight = CoJevLight target and direct "
+            "neighbours, per_intersection packaging (default). llmlight and "
             "collmlight are accepted as aliases. Sets the defaults for "
-            "--packaging and the congestion question; explicit flags still "
-            "win"
+            "--packaging; cojevlight requires per_intersection. Both modes include a congestion question by default"
         ),
     )
     parser.add_argument(
@@ -204,12 +211,9 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--no_speculative",
-        action="store_true",
-        help=(
-            "Drop the congestion Noul question from each request (the "
-            "jevlight agent mode never sends it)"
-        ),
+        "--speculative", type=parse_bool, nargs="?", const=True, default=False,
+        metavar="{true,false}",
+        help="Include the optional congestion question (default: false in both modes)",
     )
     parser.add_argument(
         "--max_workers",
@@ -217,9 +221,16 @@ def parse_args():
         default=8,
         help="Concurrent requests for per_intersection packaging",
     )
+    parser.add_argument('--jev_batch_size', type=int, default=0,
+                        help='Local native batch cap; 0 preserves individual requests')
+    parser.add_argument(
+        "--cojev_history_steps", type=int, default=0,
+        help="Compatibility field; must be 0 (CoJevLight uses current state only)",
+    )
     parser.add_argument(
         "--mock_jev",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=False,
         help="Deterministic local answers for pipeline smoke tests (no API)",
     )
     parser.add_argument(
@@ -247,7 +258,7 @@ def parse_args():
     parser.add_argument("--count", type=int, default=3600)
     parser.add_argument("--start_time", type=int, default=0)
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--eightphase", action="store_true")
+    parser.add_argument("--eightphase", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument(
         "--use_wandb",
         action=argparse.BooleanOptionalAction,
@@ -287,7 +298,70 @@ def parse_args():
         default=False,
         help="Keep serving the final 3D state after the run until Ctrl-C",
     )
-    return parser.parse_args()
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config")
+    config_path = config_parser.parse_known_args(argv)[0].config
+    if config_path:
+        try:
+            defaults = load_experiment_defaults(parser, config_path)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        parser.set_defaults(**defaults)
+    args = parser.parse_args(argv)
+    if args.jev_batch_size < 0:
+        parser.error('--jev_batch_size must be nonnegative')
+    if args.jev_batch_size and args.jev_transport != 'local':
+        parser.error('--jev_batch_size requires local transport')
+    if args.jev_batch_size and args.packaging == 'network':
+        parser.error('--jev_batch_size requires per_intersection packaging')
+    if args.cojev_history_steps != 0:
+        parser.error("--cojev_history_steps must be 0: current state only")
+    if AGENT_MODE_ALIASES.get(args.agent, args.agent) == "cojevlight":
+        if args.packaging not in (None, "per_intersection"):
+            parser.error("cojevlight requires --packaging per_intersection (target and direct neighbours only)")
+        args.packaging = "per_intersection"
+    return args
+
+
+def load_experiment_defaults(parser, filename):
+    """Validate file defaults; explicit CLI flags retain argparse precedence."""
+    path = Path(filename).resolve()
+    config_root = Path(__file__).resolve().parent / "config"
+    if path.parent.parent != config_root or path.suffix != ".json":
+        raise ValueError("Experiment configs must be config/<model>/<experiment>.json")
+    try:
+        values = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in {filename}: {exc}") from exc
+    if not isinstance(values, dict):
+        raise ValueError("Experiment config must be a JSON object")
+    actions = {a.dest: a for a in parser._actions}
+    forbidden = {"help", "config", "print_config", "jev_api_key"}
+    for key, value in values.items():
+        if key not in actions or key in forbidden:
+            raise ValueError(f"Unknown or prohibited config parameter: {key}")
+        action = actions[key]
+        if value is None and action.default is None:
+            continue
+        if action.type is parse_bool or isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction, argparse.BooleanOptionalAction)):
+            valid = type(value) is bool
+        elif action.type is int:
+            valid = type(value) is int
+        elif action.type is float:
+            valid = type(value) in (int, float)
+        else:
+            valid = isinstance(value, str)
+        if not valid:
+            raise ValueError(f"Invalid type for config parameter {key}: {value!r}")
+        if action.choices is not None and value not in action.choices:
+            raise ValueError(f"Invalid value for config parameter {key}: {value!r}")
+    return values
+
+
+def experiment_parameters(args):
+    """Reproducible resolved parameters without credentials or preflight flags."""
+    return {key: value for key, value in vars(args).items()
+            if key not in {"jev_api_key", "print_config"}}
 
 
 def build_configs(args, dataset_config, run_id):
@@ -329,13 +403,26 @@ def build_configs(args, dataset_config, run_id):
         "PHASE_LIST": phase_list,
     })
     paths = copy.deepcopy(DIC_PATH)
+    model_name = (Path(args.config).parent.name if getattr(args, "config", None)
+                  else ("maxpressure" if args.dry_run else args.jev_model or "jev"))
+    model_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in model_name)
+    if model_name in {"", ".", ".."}:
+        raise ValueError("model name must identify a results subdirectory")
+    memo = args.memo
+    if Path(memo).name != memo or memo in {"", ".", ".."}:
+        raise ValueError("memo must be a single directory name")
+    result_dir = os.path.join("results", model_name, memo, run_id)
+    if args.evaluation_output_dir:
+        output = Path(args.evaluation_output_dir).resolve()
+        if not output.is_relative_to(Path("results").resolve()):
+            raise ValueError("evaluation_output_dir must be inside results/")
     paths.update({
-        "PATH_TO_MODEL": os.path.join("model", args.memo, run_id),
-        "PATH_TO_WORK_DIRECTORY": os.path.join("records", args.memo, run_id),
+        "PATH_TO_MODEL": os.path.join(result_dir, "model"),
+        "PATH_TO_WORK_DIRECTORY": result_dir,
         "PATH_TO_DATA": os.path.join(
             "data", dataset_config["template"], str(dataset_config["road_net"])
         ),
-        "PATH_TO_ERROR": os.path.join("errors", args.memo),
+        "PATH_TO_ERROR": os.path.join(result_dir, "errors"),
     })
     return agent_config, env_config, paths
 
@@ -376,12 +463,24 @@ def run(args):
     if not os.path.isfile(roadnet_path):
         raise FileNotFoundError(f"Roadnet file does not exist: {roadnet_path}")
 
+    # Private ordered credentials are the default for official runs without an
+    # explicitly supplied single key. Only the vault path enters the environment.
+    if args.jev_transport == "official" and not args.mock_jev and not args.dry_run:
+        from jevlight.api_key_pool import DEFAULT_VAULT, KeyPool
+        pool_path = os.environ.get("JEV_API_KEY_POOL")
+        if not pool_path and not args.jev_api_key and not resolve_jev_api_key() and DEFAULT_VAULT.exists():
+            pool_path = str(DEFAULT_VAULT)
+            os.environ["JEV_API_KEY_POOL"] = pool_path
+        pool_key = KeyPool(pool_path).select()["secret"] if pool_path else None
+    else:
+        pool_key = None
+
     # The local transport must not pick a hosted key up from the
     # environment; only an explicitly passed --jev_api_key is forwarded.
     api_key = (
         args.jev_api_key
         if args.jev_transport == "local"
-        else resolve_jev_api_key(args.jev_api_key)
+        else pool_key or resolve_jev_api_key(args.jev_api_key)
     )
     if (
         not args.mock_jev
@@ -406,7 +505,7 @@ def run(args):
     args.agent = AGENT_MODE_ALIASES.get(args.agent, args.agent)
     agent_defaults = AGENT_MODE_DEFAULTS[args.agent]
     packaging = args.packaging or agent_defaults["packaging"]
-    speculative = agent_defaults["speculative"] and not args.no_speculative
+    speculative = args.speculative
     if args.dry_run:
         # MaxPressure baseline: purely local decisions, no Jev client at all.
         packaging = "none"
@@ -425,6 +524,7 @@ def run(args):
             max_retries=args.jev_retries,
             min_interval=min_interval,
             mock=args.mock_jev,
+            batch_size=args.jev_batch_size,
         )
         controller = JevLightController(
             client,
@@ -435,6 +535,7 @@ def run(args):
             speculative=speculative,
             max_workers=args.max_workers,
             agent_mode=args.agent,
+            cojev_history_steps=args.cojev_history_steps,
         )
     agent_mode = "maxpressure" if args.dry_run else args.agent
 
@@ -445,6 +546,9 @@ def run(args):
         args.traffic_file,
     )
     env = simulator.env
+    (Path(paths["PATH_TO_WORK_DIRECTORY"]) / "experiment_config.json").write_text(
+        json.dumps(experiment_parameters(args), indent=2), encoding="utf-8"
+    )
     if args.start_time:
         simulator.reset_env_with_start_time(args.start_time)
 
@@ -478,7 +582,7 @@ def run(args):
         entity=args.wandb_entity,
         group=build_wandb_group(dataset_config, env_config, args.traffic_file),
         name=run_id,
-        config={**vars(args), "run_id": run_id},
+        config={**experiment_parameters(args), "run_id": run_id},
     )
     if logger is not None:
         logger.define_metric("final/checkpoint")
@@ -621,4 +725,8 @@ def run(args):
 
 
 if __name__ == "__main__":
-    run(parse_args())
+    args = parse_args()
+    if args.print_config:
+        print(json.dumps(experiment_parameters(args), indent=2))
+    else:
+        run(args)

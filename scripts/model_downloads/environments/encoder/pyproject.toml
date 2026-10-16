@@ -1,0 +1,11 @@
+[project]
+name = "encoder"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "gliner2[local]==2.0.0",
+    "laya==0.4.1",
+    "requests>=2.34.2",
+    "torch==2.8.0",
+    "transformers==4.57.6",
+]

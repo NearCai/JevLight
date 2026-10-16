@@ -448,19 +448,19 @@ class TestAgentModeQuestions:
         observation = make_observation()
         question = jevlight_phase_question(observation, 15)
         assert question["type"] == "choice"
-        assert "signal control agent for intersection `intersection`" in (
+        assert "signal control agent for intersection `$`" in (
             question["instructions"]
         )
         assert set(question["criteria"]) == {
             "ETWT", "NTST", "ELWL", "NLSL",
         }
 
-    def test_cojevlight_prompt_is_network_level(self):
+    def test_cojevlight_prompt_uses_direct_neighbours(self):
         observation = make_observation()
         question = cojevlight_phase_question(
-            observation, 15, "intersections.i0", network_size=12
+            observation, 15, "$"
         )
-        assert "network-level signal control agent coordinating 12" in (
+        assert "cooperating with its direct neighbours" in (
             question["instructions"]
         )
         assert "neighbours" in question["instructions"]
@@ -478,22 +478,22 @@ class TestAgentModeController:
             ]
         )
         # Mirror the runner's per-agent defaults for the speculative Noul.
-        kwargs.setdefault("speculative", agent_mode != "jevlight")
+        kwargs.setdefault("speculative", False)
         controller = JevLightController(
             client,
             15,
-            packaging=("per_intersection" if agent_mode == "jevlight" else "network"),
+            packaging="per_intersection",
             agent_mode=agent_mode,
             **kwargs,
         )
         return controller, client
 
-    def test_jevlight_sends_local_state_and_no_noul(self):
+    def test_jevlight_defaults_to_local_phase_only(self):
         controller, client = self.make_controller("jevlight")
         observations = [make_observation("i0"), make_observation("i1", empty=True)]
         controller.decide(observations, step=0)
         # Only the active intersection issues a request; its state is the
-        # bare intersection, and no congestion Noul rides along.
+        # bare intersection with only its phase question.
         assert len(client.requests) == 1
         request = client.requests[0]
         assert "intersections" not in request["state"]
@@ -502,20 +502,17 @@ class TestAgentModeController:
             request["questions"]["phase_i0"]["instructions"]
         )
 
-    def test_cojevlight_sends_network_state_and_noul(self):
+    def test_cojevlight_sends_one_target_per_request(self):
         controller, client = self.make_controller("cojevlight")
         observations = [make_observation("i0"), make_observation("i1")]
         controller.decide(observations, step=0)
-        assert len(client.requests) == 1
-        request = client.requests[0]
-        assert "intersections" in request["state"]
-        assert set(request["questions"]) == {
-            "phase_i0", "phase_i1",
-            f"{CONGESTION_QUESTION_PREFIX}i0", f"{CONGESTION_QUESTION_PREFIX}i1",
-        }
-        assert "network-level signal control agent coordinating 2" in (
-            request["questions"]["phase_i0"]["instructions"]
-        )
+        assert len(client.requests) == 2
+        for request in client.requests:
+            state = request["state"]
+            assert "intersections" not in state
+            assert state["cooperative_view"] == {}
+            assert set(request["questions"]) == {f"phase_{state['intersection_id']}"}
+            assert "cooperating with its direct neighbours" in next(iter(request["questions"].values()))["instructions"]
 
     def test_trace_records_agent_mode(self):
         controller, _client = self.make_controller("jevlight")

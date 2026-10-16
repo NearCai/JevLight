@@ -1,0 +1,6 @@
+model_id = "Cloudflare/clef-flash"
+family = "clef"
+weights_path = ".local/models/clef-flash/weights"
+max_length = 262144
+host = "127.0.0.1"
+port = 8123

@@ -1,0 +1,9 @@
+model_id = "ZefanCai/Open-Jev-9B"
+family = "open-jev"
+weights_path = ".local/models/open-jev-9b/weights"
+max_length = 262144
+host = "127.0.0.1"
+port = 8123
+inference_engine = "vllm_pooling"
+engine_token_budget = 131072
+engine_gpu_memory_utilization = 0.75

@@ -1,0 +1,7 @@
+model_id = "jaredpalmer/kev-0.8b"
+family = "kev"
+weights_path = ".local/models/kev-0.8b/weights"
+max_length = 73728
+host = "127.0.0.1"
+port = 8123
+max_state_tokens = 65536

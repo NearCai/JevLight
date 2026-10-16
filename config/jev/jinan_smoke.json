@@ -1,0 +1,18 @@
+{
+  "agent": "cojevlight",
+  "packaging": "per_intersection",
+  "jev_transport": "mcp",
+  "mock_jev": true,
+  "dataset": "jinan",
+  "traffic_file": "anon_3_4_jinan_real.rou.xml",
+  "memo": "jinan_smoke",
+  "count": 60,
+  "duration": 15,
+  "cojev_history_steps": 0,
+  "seed": 1,
+  "rolling_evaluation": true,
+  "use_wandb": false,
+  "max_workers": 8,
+  "jev_retries": 3,
+  "speculative": false
+}
