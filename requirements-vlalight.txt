@@ -1,0 +1,8 @@
+-r requirements.txt
+
+# Optional original VLALight/TransSimHub offscreen renderer.
+panda3d>=1.10.15,<1.11
+panda3d-gltf>=1.2,<2
+panda3d-simplepbr>=0.12,<1
+loguru>=0.7,<1
+shapely>=2,<3

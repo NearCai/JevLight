@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Optional headless capture of the existing Three.js visualizer.
+playwright>=1.40,<2

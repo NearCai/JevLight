@@ -17,6 +17,7 @@ const state = {
   stepsPerSecond: 0,
   camMode: false,
 };
+const captureMode = new URLSearchParams(window.location.search).get("capture") === "1";
 
 // Surface any runtime error on the page itself — a hidden failure is a
 // blue sky and zero readouts, with no clue about what broke.
@@ -345,7 +346,55 @@ async function boot() {
   showBanner("building the city…");
   await new Promise((resolve) => setTimeout(resolve)); // let the banner paint
   buildNetwork(state.net);
-  connectStream();
+  if (captureMode) {
+    // Synchronous renders: SUMO is paused while this frozen frame is captured.
+    window.setJevFrame = (frame) => {
+      fleet.update(frame.vehicles);
+      signals.update(frame.tls);
+    };
+    window.captureJevFrame = captureJevFrame;
+  } else {
+    connectStream();
+  }
+}
+
+function captureJevFrame(junctionId) {
+  if (!trafficCam.setJunction(junctionId)) throw new Error(`Unknown junction ${junctionId}`);
+  if (trafficCam.cameras.length !== 4) throw new Error("Image mode needs four approach views");
+  renderer.setPixelRatio(1);
+  renderer.setSize(1024, 768);
+  trafficCam.setAspect(512 / 384);
+  trafficCam.hide();
+  const result = document.createElement("canvas");
+  result.width = 1024;
+  result.height = 768;
+  const context = result.getContext("2d");
+  renderer.setScissorTest(true);
+  trafficCam.cameras.forEach((view, i) => {
+    const x = (i % 2) * 512;
+    const y = Math.floor(i / 2) * 384;
+    renderer.setViewport(x, 768 - y - 384, 512, 384);
+    renderer.setScissor(x, 768 - y - 384, 512, 384);
+    renderer.clear();
+    renderer.render(scene, view.camera);
+  });
+  context.drawImage(canvas, 0, 0);
+  trafficCam.cameras.forEach((view, i) => {
+    const approach = ["south", "west", "north", "east"][
+      Math.round(view.bearing / 90) % 4
+    ];
+    const travel = ["northbound", "eastbound", "southbound", "westbound"][
+      Math.round(view.bearing / 90) % 4
+    ];
+    const x = (i % 2) * 512;
+    const y = Math.floor(i / 2) * 384;
+    context.fillStyle = "#10151e";
+    context.fillRect(x, y, 512, 32);
+    context.fillStyle = "white";
+    context.font = "bold 20px sans-serif";
+    context.fillText(`${travel} traffic (from ${approach})`, x + 12, y + 23);
+  });
+  return result.toDataURL("image/jpeg", 0.9);
 }
 
 boot().catch((err) => {
@@ -355,6 +404,7 @@ boot().catch((err) => {
 
 // Render loop: main city view, then the camera sub-views on top.
 (function animate() {
+  if (captureMode) return;
   requestAnimationFrame(animate);
   controls.update();
   renderer.setScissorTest(false);

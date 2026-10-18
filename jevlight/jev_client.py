@@ -31,6 +31,7 @@ import os
 import time
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 
@@ -200,14 +201,28 @@ class JevClient:
         self,
         state: Any,
         questions: Mapping[str, Any],
+        assets: Optional[Mapping[str, Path]] = None,
     ) -> JevResult:
         """Evaluate ``questions`` against ``state`` in one Jev request.
+
+        Passing ``assets={reference: Path(image)}`` opts into experimental
+        image input on the official transport. Reference the unique string in
+        a state/question value. Images use REST multipart even with an SDK.
 
         ``latency`` in the result starts after the pacing sleep (which is
         self-imposed waiting, not service time) but includes retry backoff —
         that is the real time the control loop waits for an answer.
         """
+        if assets and self.transport != "official":
+            raise ValueError("image assets require the official TypeSafe transport")
         if self.mock:
+            if assets:
+                # A pipeline check, not a vision model or benchmark result.
+                return JevResult(answers={
+                    key: {"type": "choice", "choice": next(iter(q["criteria"])),
+                          "confidence": 1.0, "probabilities": {}}
+                    for key, q in questions.items()
+                }, model="image-pipeline-mock")
             return self._mock_evaluate(state, questions, time.time())
         self._pace()
         if self._key_pool is not None:
@@ -220,11 +235,11 @@ class JevClient:
                                            timeout=self.timeout, max_retries=self.max_retries,
                                            key_pool=False)
                         self._pool_clients[key["id"]] = client
-                return client._evaluate_once(state, questions)
+                return client._evaluate_once(state, questions, assets=assets)
             return self._key_pool.evaluate(call)
-        return self._evaluate_once(state, questions)
+        return self._evaluate_once(state, questions, assets=assets)
 
-    def _evaluate_once(self, state, questions):
+    def _evaluate_once(self, state, questions, *, assets=None):
         started = time.time()
         if self.transport == "mcp":
             return self._evaluate_mcp(state, questions, started)
@@ -238,8 +253,9 @@ class JevClient:
                 started,
                 model_field=self.model,
                 authorized=self.api_key is not None,
+                assets=assets,
             )
-        if self._sdk_client is not None:
+        if self._sdk_client is not None and not assets:
             return self._evaluate_sdk(state, questions, started)
         return self._evaluate_systemone_rest(
             state,
@@ -247,6 +263,7 @@ class JevClient:
             started,
             model_field=self.model or DEFAULT_JEV_MODEL,
             authorized=True,
+            assets=assets,
         )
 
     def _pace(self) -> None:
@@ -493,6 +510,7 @@ class JevClient:
         *,
         model_field: Optional[str],
         authorized: bool,
+        assets: Optional[Mapping[str, Path]] = None,
     ) -> JevResult:
         """POST the System One wire format to ``{base_url}/v1/systemone``.
 
@@ -509,16 +527,29 @@ class JevClient:
         if model_field:
             payload["model"] = model_field
         headers = {"Content-Type": "application/json"}
+        if assets:
+            # Image input is an experimental TypeSafe feature and is opt-in
+            # on every request by design.
+            headers["TypeSafe-Danger-Zone-Images"] = "true"
         if authorized:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        try:
+            if assets:
+                files = self._image_parts(payload, assets)
+                del headers["Content-Type"]  # requests supplies the multipart boundary
+                request_body = {"files": files}
+            else:
+                request_body = {"json": payload}
+        except (OSError, ValueError, ImportError) as exc:
+            return JevResult(error=f"image input: {exc}", latency=time.time() - started)
         delay = 1.0
         for attempt in range(self.max_retries + 1):
             try:
                 response = requests.post(
                     f"{self.base_url}/v1/systemone",
                     headers=headers,
-                    json=payload,
                     timeout=self.timeout,
+                    **request_body,
                 )
                 if response.status_code in (429, 529) and attempt < self.max_retries:
                     retry_after = response.headers.get("retry-after")
@@ -527,10 +558,12 @@ class JevClient:
                         if retry_after is not None
                         else delay
                     )
-                    delay *= 2
+                    delay = min(delay * 2, 30.0)
                     continue
                 response.raise_for_status()
                 body = response.json()
+                if not isinstance(body.get("answers", {}), dict):
+                    raise ValueError("System One response answers must be an object")
                 usage = body.get("usage") or {}
                 return JevResult(
                     answers=body.get("answers") or {},
@@ -542,21 +575,70 @@ class JevClient:
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"
                 status = getattr(getattr(exc, "response", None), "status_code", None)
-                if attempt < self.max_retries and not (self.transport == "official" and status == 402):
+                retryable = (
+                    (status is None or status in (408, 425, 429) or status >= 500)
+                    and not (self.transport == "official" and status == 402)
+                )
+                if retryable and attempt < self.max_retries:
                     time.sleep(delay)
-                    delay *= 2
+                    delay = min(delay * 2, 30.0)
                     continue
                 return JevResult(
                     latency=time.time() - started,
                     error=message,
+                    rate_limited=(
+                        self._is_rate_limited(message)
+                        or getattr(getattr(exc, "response", None), "status_code", None) == 429
+                    ),
                     http_status=status,
-                    rate_limited=self._is_rate_limited(message),
                 )
         return JevResult(
             latency=time.time() - started,
             error="exhausted retries",
             rate_limited=True,
         )
+
+    @staticmethod
+    def _image_parts(payload: Dict[str, Any], assets: Mapping[str, Path]) -> list:
+        """Build the documented multipart request; validate before uploading."""
+        from PIL import Image
+
+        parts = []
+        def string_values(value):
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, Mapping):
+                for item in value.values():
+                    yield from string_values(item)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    yield from string_values(item)
+
+        references = list(string_values([payload["state"], payload["questions"]]))
+        payload["assets"] = {}
+        for index, (ref, filename) in enumerate(assets.items()):
+            if not ref or not any(ref in text for text in references):
+                raise ValueError(f"unreferenced image asset: {ref!r}")
+            path = Path(filename)
+            if path.stat().st_size > 16 * 1024 * 1024:
+                raise ValueError("image exceeds the 16 MiB limit")
+            with Image.open(path) as image:
+                width, height = image.size
+                if image.format not in ("PNG", "JPEG") or getattr(image, "n_frames", 1) != 1:
+                    raise ValueError("images must be still PNG or JPEG files")
+                if not (256 <= width <= 1568 and 256 <= height <= 1568
+                        and width * height >= 78400):
+                    raise ValueError("image dimensions violate TypeSafe's image limits")
+                content_type = "image/png" if image.format == "PNG" else "image/jpeg"
+                image.verify()
+            part_name = f"image-{index}"
+            payload["assets"][ref] = {"type": "image", "part": part_name}
+            parts.append((part_name, (path.name, path.read_bytes(), content_type)))
+        parts.insert(0, ("request", (None, json.dumps(payload), "application/json")))
+        # Leave room for multipart framing; our renderer emits one small JPEG.
+        if sum(len(part[1][1]) + 4096 for part in parts) > 32 * 1024 * 1024:
+            raise ValueError("image request exceeds the 32 MiB body limit")
+        return parts
 
     # ------------------------------------------------------------------ #
     # Mock transport for pipeline smoke tests

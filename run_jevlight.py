@@ -40,9 +40,13 @@ Examples:
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import copy
+import hashlib
 import json
 import os
+import platform
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -69,6 +73,7 @@ from jevlight.controller import (
 )
 from jevlight.env_bridge import JevLightEnv
 from jevlight.evaluation_metrics import calculate_evaluation_metrics_from_env
+from jevlight.images import ImageRenderer
 from jevlight.jev_client import (
     DEFAULT_JEV_MODEL,
     DEFAULT_LOCAL_BASE_URL,
@@ -233,6 +238,25 @@ def parse_args(argv=None):
         default=False,
         help="Deterministic local answers for pipeline smoke tests (no API)",
     )
+    parser.add_argument(
+        "--image_decisions",
+        action="store_true",
+        help=(
+            "Enable experimental direct image-to-phase decisions on official "
+            "TypeSafe. Select Three.js or VLALight cameras with --image_renderer."
+        ),
+    )
+    parser.add_argument(
+        "--image_prompt",
+        default=None,
+        help="Append task instructions to the direct image-to-phase prompt",
+    )
+    parser.add_argument("--image_renderer", choices=("threejs", "vlalight"), default="threejs")
+    parser.add_argument("--vlalight_root", default="logs/vlalight-source/VLALight",
+                        help="VLALight source directory containing TransSimHub")
+    parser.add_argument("--render_batch_size", type=int, default=4)
+    parser.add_argument("--fail_on_image_fallback", action="store_true",
+                        help="Stop an image benchmark after any fallback; preserve the trace")
     parser.add_argument(
         "--dry_run",
         action=argparse.BooleanOptionalAction,
@@ -408,21 +432,30 @@ def build_configs(args, dataset_config, run_id):
     model_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in model_name)
     if model_name in {"", ".", ".."}:
         raise ValueError("model name must identify a results subdirectory")
-    memo = args.memo
-    if Path(memo).name != memo or memo in {"", ".", ".."}:
-        raise ValueError("memo must be a single directory name")
-    result_dir = os.path.join("results", model_name, memo, run_id)
-    if args.evaluation_output_dir:
+    memo_path = Path(args.memo)
+    if (
+        memo_path.is_absolute()
+        or not memo_path.parts
+        or any(part in {"", ".", ".."} for part in memo_path.parts)
+    ):
+        raise ValueError("memo must be a single directory name or safe relative path")
+    memo = str(memo_path)
+    # Keep the VLALight benchmark's historical records/ layout so its resume
+    # scanner can reuse completed seeds; portable model experiments use the
+    # upstream results/<model>/<memo>/<run> layout.
+    root_dir = "records" if (args.image_decisions or args.dry_run) else os.path.join("results", model_name)
+    result_dir = Path(root_dir, memo, run_id).as_posix()
+    if args.evaluation_output_dir and not args.image_decisions:
         output = Path(args.evaluation_output_dir).resolve()
         if not output.is_relative_to(Path("results").resolve()):
             raise ValueError("evaluation_output_dir must be inside results/")
     paths.update({
-        "PATH_TO_MODEL": os.path.join(result_dir, "model"),
+        "PATH_TO_MODEL": Path(result_dir, "model").as_posix(),
         "PATH_TO_WORK_DIRECTORY": result_dir,
-        "PATH_TO_DATA": os.path.join(
+        "PATH_TO_DATA": Path(
             "data", dataset_config["template"], str(dataset_config["road_net"])
-        ),
-        "PATH_TO_ERROR": os.path.join(result_dir, "errors"),
+        ).as_posix(),
+        "PATH_TO_ERROR": Path(result_dir, "errors").as_posix(),
     })
     return agent_config, env_config, paths
 
@@ -442,10 +475,27 @@ def build_wandb_group(dataset_config, env_config, traffic_file):
 
 
 def run(args):
+    with ExitStack() as resources:
+        return _run(args, resources)
+
+
+def _run(args, resources):
+    wall_started = time.perf_counter()
     if args.duration <= 5:
         raise ValueError("duration must be greater than the 5-second yellow time")
     if args.count <= 0:
         raise ValueError("count must be positive")
+    if args.image_decisions and args.dry_run:
+        raise ValueError("--image_decisions cannot be combined with --dry_run")
+    if args.image_decisions and args.jev_transport != "official":
+        raise ValueError("--image_decisions requires --jev_transport official")
+    if args.image_decisions:
+        if args.packaging not in (None, "per_intersection") or args.fallback != "previous":
+            raise ValueError("image mode requires per_intersection packaging and previous fallback")
+        args.agent = "jevlight"
+        args.packaging = "per_intersection"
+        args.speculative = False
+        args.jev_model = args.jev_model or "jev-1.14.0"
 
     dataset_config = setup_dataset_config(args.dataset)
     if args.road_net:
@@ -546,6 +596,7 @@ def run(args):
         args.traffic_file,
     )
     env = simulator.env
+    resources.callback(env.end_engine)
     (Path(paths["PATH_TO_WORK_DIRECTORY"]) / "experiment_config.json").write_text(
         json.dumps(experiment_parameters(args), indent=2), encoding="utf-8"
     )
@@ -557,6 +608,26 @@ def run(args):
     # play/pause/step buttons gate the loop between steps.
     viz_runtime: Optional[PassiveRuntime] = None
     viz_server = None
+    image_renderer = None
+    if args.image_decisions:
+        frame_dir = Path(paths["PATH_TO_WORK_DIRECTORY"]) / "vision_frames"
+        if args.image_renderer == "vlalight":
+            from jevlight.vlalight_images import VLALightRenderer
+            image_renderer = resources.enter_context(VLALightRenderer(
+                args.vlalight_root, dataset_config, roadnet_path, frame_dir,
+                batch_size=args.render_batch_size,
+            ))
+        else:
+            image_renderer = resources.enter_context(ImageRenderer(roadnet_path, frame_dir))
+
+    class TeleportCounter:
+        count = 0
+
+        def on_simulation_second(self, env):
+            self.count += env.traci_conn.simulation.getStartingTeleportNumber()
+
+    teleport_counter = TeleportCounter()
+    env.add_step_listener(teleport_counter)
     if args.visualize:
         viz_network = NetworkModel.load(roadnet_path)
         viz_conn = getattr(env, "traci_conn", None)
@@ -572,6 +643,9 @@ def run(args):
             host=args.viz_host,
             port=args.viz_port,
         )
+        resources.callback(viz_server.server_close)
+        resources.callback(viz_server.shutdown)
+        resources.callback(viz_runtime.close)
         if viz_conn:
             viz_runtime.publish(viz_conn)
         open_viz_page(viz_url)
@@ -612,10 +686,13 @@ def run(args):
                 "agent_mode": agent_mode,
                 "jev_transport": None if args.dry_run else args.jev_transport,
                 "jev_model": None if args.dry_run else args.jev_model,
+                "jev_retry_limit": None if args.dry_run else args.jev_retries,
                 "packaging": packaging,
                 "fallback": args.fallback,
                 "min_confidence": args.min_confidence,
                 "traffic_file": args.traffic_file,
+                "input_mode": "image" if args.image_decisions else "text",
+                "mock_jev": bool(args.mock_jev),
             },
         )
         rolling_recorder.attach(env, evaluation_start_time=args.start_time)
@@ -640,7 +717,17 @@ def run(args):
                 if viz_runtime is not None:
                     viz_runtime.wait_until_running()
                 observations = collect_observations(env)
-                actions, traces = controller.decide(observations, step)
+                if args.image_decisions:
+                    image_paths = image_renderer.capture(
+                        env.traci_conn,
+                        [observation.intersection_id for observation in observations],
+                        step,
+                    )
+                    actions, traces = controller.decide_images(
+                        observations, image_paths, step, prompt=args.image_prompt
+                    )
+                else:
+                    actions, traces = controller.decide(observations, step)
                 step_duration = args.duration
                 if args.rolling_evaluation:
                     step_duration = min(
@@ -654,6 +741,10 @@ def run(args):
                 for trace in traces:
                     trace_file.write(json.dumps(trace, ensure_ascii=False) + "\n")
                 trace_file.flush()
+                if args.image_decisions and args.fail_on_image_fallback and any(
+                    trace.get("fallback") or trace.get("error") for trace in traces
+                ):
+                    raise RuntimeError("Image benchmark stopped after a failed/fallback decision; see decision trace")
                 current_time = float(env.get_current_time())
                 step += 1
                 progress.update(step_duration)
@@ -685,18 +776,48 @@ def run(args):
         safe_wandb_log(logger, metrics)
     safe_wandb_finish(logger)
     summary_path = Path(paths["PATH_TO_WORK_DIRECTORY"]) / "summary.json"
+    fallback_count = 0
+    with trace_path.open(encoding="utf-8") as traces:
+        for line in traces:
+            if line.strip():
+                fallback_count += bool(json.loads(line).get("fallback"))
+    try:
+        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        dirty = bool(subprocess.check_output(["git", "diff", "HEAD", "--stat"], text=True).strip())
+    except (OSError, subprocess.CalledProcessError):
+        revision, dirty = None, None
     summary_path.write_text(
         json.dumps(
             {
                 "run_id": run_id,
+                "dataset": args.dataset,
+                "traffic_file": args.traffic_file,
+                "seed": args.seed,
+                "requested_horizon_s": args.count,
+                "control_interval_s": args.duration,
+                "roadnet_sha256": hashlib.sha256(Path(roadnet_path).read_bytes()).hexdigest(),
+                "traffic_sha256": hashlib.sha256(Path(traffic_path).read_bytes()).hexdigest(),
+                "git_revision": revision,
+                "git_dirty": dirty,
+                "python_version": platform.python_version(),
+                "sumo_version": env.traci_conn.getVersion(),
+                "wall_time_s": time.perf_counter() - wall_started,
+                "teleport_count": teleport_counter.count,
+                "fallback_count": fallback_count,
+                "image_renderer": args.image_renderer if args.image_decisions else None,
+                "renderer_metadata": getattr(image_renderer, "metadata", None),
                 "agent_mode": agent_mode,
                 "jev_transport": None if args.dry_run else args.jev_transport,
                 "jev_model": None if args.dry_run else args.jev_model,
+                "jev_retry_limit": None if args.dry_run else args.jev_retries,
                 "packaging": packaging,
                 "fallback": args.fallback,
                 "min_confidence": args.min_confidence,
                 "dry_run": bool(args.dry_run),
                 "visualize": bool(args.visualize),
+                "image_decisions": bool(args.image_decisions),
+                "input_mode": "image" if args.image_decisions else "text",
+                "mock_jev": bool(args.mock_jev),
                 **metrics,
                 "jev": controller.usage_summary(),
             },
@@ -711,13 +832,7 @@ def run(args):
                 time.sleep(0.5)
         except KeyboardInterrupt:
             pass
-    if viz_runtime is not None:
-        viz_runtime.close()
-    if viz_server is not None:
-        viz_server.shutdown()
-        viz_server.server_close()
     env.batch_log()
-    env.end_engine()
     print(json.dumps(metrics, indent=2))
     print(f"Decision log: {trace_path}")
     print(f"Summary: {summary_path}")

@@ -4,6 +4,7 @@ numpy
 pandas
 requests
 tqdm
+Pillow
 traci>=1.20
 sumolib>=1.20
 

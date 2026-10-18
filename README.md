@@ -2,7 +2,7 @@
 
 Traffic signal control with **Jev**, the System One decision model — applied to SUMO simulation on top of the observation and control-flow conventions of **LLMLight / CoLLMLight**.
 
-Jev is not a chat model: one request sends a **state** plus a map of typed **questions**, and returns one typed answer per question, evaluated in parallel. JevLight maps signal control directly onto that interface — the model picks an action from the options you give it, with pure-text prompts and millisecond-scale decisions.
+Jev is not a chat model: one request sends a **state** plus a map of typed **questions**, and returns one typed answer per question, evaluated in parallel. JevLight maps signal control directly onto that interface: the model picks an action from the options you give it. The default path uses structured traffic observations; the optional experimental image path uses camera images and a prompt.
 
 ## How signal control maps onto Jev
 
@@ -15,7 +15,7 @@ Jev is not a chat model: one request sends a **state** plus a map of typed **que
 
 **Per-intersection packaging** (default): each active junction receives one request with one phase question. CoJevLight includes only the target's current state and its direct upstream/downstream neighbours; JevLight uses the target's local state. CoJevLight rejects `--packaging network`. Empty junctions use local ranking without a model request, while their current states remain available to neighbouring targets.
 
-Fallbacks follow the ChatLight source conventions:
+The default text path follows the ChatLight source conventions:
 
 - Empty junctions (no vehicles) never call the API; they use the exact CoLLMLight local waiting-time ranking.
 - Failed / rate-limited / unparsable requests keep the previous signal (`--fallback previous`, default) or use the local ranking (`--fallback ranking`).
@@ -47,6 +47,7 @@ scripts/serve_jev.sh       # start a local Jev-style model service (vLLM/mock)
 scripts/serve_3d.py        # 3D SUMO visualizer bridge (traci -> SSE)
 jevlight/viz_server.py     # visualizer server core (standalone + --visualize)
 viz/                       # three.js frontend for the 3D visualizer
+jevlight/images.py         # synchronized headless camera capture for image decisions
 utils/
   sumo_env.py              # SUMO runtime (from ChatLight, profiling hook stubbed)
   phase_utils.py           # phase helpers (from ChatLight)
@@ -145,6 +146,82 @@ Three transports are supported:
 All transports answer the same `state` + typed `questions` request. The optional
 [API key pool and experiment queue](docs/jev_api_experiments.md) support ordered
 credential rotation on HTTP 402 and resumable API experiments.
+
+## Experimental image decisions (Jev 1.14)
+
+TypeSafe's [image API](https://docs.typesafe.ai/images) accepts an image plus
+instructions and returns the same typed `choice` answer. This path uses **one
+direct decision per intersection**, with no separate perception model, fast/slow
+reasoning, or VLALight training code. The default model is pinned to
+`jev-1.14.0`; a versioned ID avoids changes to the `jev-preview`/`jev-latest`
+aliases during an experiment.
+
+```bash
+pip install -r requirements-images.txt
+python -m playwright install chromium
+export TYPESAFE_API_KEY=...
+python run_jevlight.py --jev_transport official --image_decisions \
+  --dataset jinan --count 900
+
+# Capture + control-loop smoke test, without an API key or vision inference:
+python run_jevlight.py --jev_transport official --image_decisions \
+  --mock_jev --count 30
+```
+
+`--image_prompt "Prioritize visible spillback"` appends task instructions to
+the camera/phase prompt. Image mode selects `jevlight`, `per_intersection`
+packaging and `previous` fallback, and omits the speculative congestion question.
+Explicit network packaging, ranking fallback and `--dry_run` are rejected.
+The MCP endpoint and the repository's text-only local adapter have no image
+support in this implementation.
+
+At each control boundary, SUMO stays paused while its **current** vehicle
+positions and signals populate the existing Three.js scene in headless Chromium.
+Each junction produces a 1024×768 JPEG with four approach views labelled by
+vehicle travel direction. The renderer currently requires four approaches, as in
+the supplied grid datasets. It uses the visualizer's CDN imports, so Chromium
+must be able to reach `unpkg.com` when starting a run.
+
+Only the image, junction ID, current phase, control interval and phase criteria
+reach Jev. Queue counts, waiting times, occupancy, and neighboring state are not
+included. Empty junctions also receive image decisions. API errors, invalid
+choices and low confidence keep the previous phase; a rendering failure stops
+the run. `--mock_jev` chooses the first allowed phase and is **not a vision
+benchmark**.
+
+The HTTP client uses the documented multipart protocol: JSON `request` first,
+an `assets` map referring to JPEG/PNG file parts, and the explicit
+`TypeSafe-Danger-Zone-Images: true` header. Images bypass the optional SDK so
+older SDK versions cannot silently discard assets. File format, dimensions,
+references and upload size are checked before sending. The experiment saves
+the exact frames under `records/<memo>/<run>/vision_frames/` and records their
+paths, prompt, answer, confidence, fallback, tokens and request latency in
+`jev_decisions.jsonl`. Summary files distinguish image/text and mock runs.
+
+For an already captured image, the low-level API is also available:
+
+```python
+from pathlib import Path
+from uuid import uuid4
+from jevlight.jev_client import JevClient
+
+ref = str(uuid4())
+client = JevClient(transport="official", model="jev-1.14.0")
+result = client.evaluate(
+    state={"camera_image": ref},
+    questions={"phase": {"type": "choice",
+        "instructions": "Use camera_image to choose the next traffic phase.",
+        "criteria": {"ETWT": "east/west through", "NTST": "north/south through"}}},
+    assets={ref: Path("camera.jpg")},
+)
+```
+
+Images are an opt-in **Danger Zone** experiment, not a production feature.
+[Box](https://docs.typesafe.ai/primitives/box) localizes objects; it is unnecessary
+for choosing a signal phase. The separate 262k-context feature is also unnecessary
+here, so this path does not enable it. See the official
+[release notes](https://typesafe.ai/blog/jev-1-14) and
+[model limits](https://docs.typesafe.ai/models).
 
 Community-endpoint notes (observed behavior):
 
@@ -290,6 +367,113 @@ Four SUMO scenarios ship with the repo (selected with `--dataset`, traffic file 
 | `newyork_16x3` | 16×3 | 48 | real |
 
 MZW and Manhattan are not included; copy them from the upstream project's `data/` and register them in `jevlight/config.py` if needed. Published SUMO benchmark results are available on the project homepage, with data in `assets/benchmark.json`.
+
+## VLALight cameras + direct Jev decisions
+
+`--image_renderer vlalight` reuses [VLALight](https://github.com/usail-hkust/VLALight)'s
+TransSimHub/Panda3D renderer and its scenario GLB assets. Source and assets are
+pinned to `9844f1b6bbd6b4fe80b481d3dd16fadce13c3b5d`; the fetch script verifies
+each file against its Git blob hash. The SUMO controller and metric recorder
+remain JevLight's. This is a rendering integration, with one direct Jev choice
+per intersection; VLALight's video/perception agents and fast/slow reasoning
+stages are not part of this path.
+
+At each control boundary SUMO pauses while the adapter copies current vehicle
+poses into the renderer. Four 30 m approach cameras render at 1080P. Each view
+uses VLALight's horizontal crop (40% from the left, 30% from the right), is
+resized to 384 x 720 and labelled with vehicle travel direction. The four views
+form one 768 x 1440 JPEG. Camera batches reuse GPU resources; an explicit GPU
+synchronization precedes pixel readback. Rendering does not advance SUMO or
+replace its TraCI subscriptions.
+
+The official TypeSafe multipart API receives that image, current phase and one
+traffic-control prompt. It returns a phase choice, applied for a 15-second
+interval including five seconds of yellow when changing phase. Numeric queue,
+occupancy and waiting-time observations are not sent to Jev. Image requests
+explicitly opt into the [experimental Images API](https://docs.typesafe.ai/images).
+
+```mermaid
+flowchart LR
+    S[SUMO / TraCI snapshot] --> R[VLALight / Panda3D cameras]
+    R --> I[Four labelled views / one JPEG]
+    I --> J[Jev 1.14 / image + prompt]
+    J --> P[Phase choice / yellow transition]
+    P --> S
+    S --> M[Per-second traffic metrics]
+```
+
+Install SUMO, Python requirements and GitHub CLI (`gh`) first. This optional
+renderer needs a working OpenGL graphics context; the local checks used Windows.
+The existing browser viewer (`--visualize`) continues to use Three.js.
+
+```bash
+python scripts/fetch_vlalight_renderer.py
+pip install -r requirements-vlalight.txt
+# Four networks, 30 seconds each; mock decisions only, no model score:
+python scripts/benchmark_vlalight_jev.py --method smoke --seeds 1 --execute
+# All ten available route files, seeds 1/2/3; no API:
+python scripts/benchmark_vlalight_jev.py --method maxpressure --execute --workers 2
+# Save the full Jev plan without making requests:
+python scripts/benchmark_vlalight_jev.py --method jev-image
+```
+
+For actual Jev evaluation, set `TYPESAFE_API_KEY` in the same terminal
+(PowerShell: `$env:TYPESAFE_API_KEY = "your-key"`; Bash:
+`export TYPESAFE_API_KEY="your-key"`), then run:
+
+```bash
+python scripts/benchmark_vlalight_jev.py --method jev-image --execute
+```
+
+### Vision benchmark status
+
+This branch contains the Vision API and VLALight evaluation code only. Generated
+SUMO traces, API responses, logs and score tables are deliberately left out of
+the pull request while the full run is still in progress. The result fields
+will be filled in a follow-up commit after all scenarios and seeds finish:
+
+| Evaluation | Model/input | Status | Results |
+| --- | --- | --- | --- |
+| VLALight camera decisions | Jev 1.14.0, image + prompt | running | pending |
+| MaxPressure reference | SUMO state, no Jev request | pending | pending |
+
+The Vision path is a direct image decision test: the existing VLALight renderer
+creates the camera image, Jev receives that image and the traffic-control prompt,
+and the returned phase choice is applied in SUMO. It does not add VLALight's
+fast/slow reasoning or perception agent. Results will be reported separately
+from the historical text-only JevLight benchmark.
+
+The full Jev matrix requires approximately **608,160 image requests before
+retries**, with the model pinned to `jev-1.14.0`. Runs execute serially; each
+control boundary can issue up to eight concurrent intersection requests. Add
+`--datasets jinan --seeds 1` for an initial subset, or `--resume` to reuse
+completed runs with matching data, method, model and renderer revision. Failed
+or fallback image decisions stop that run and cannot enter the score table.
+Mock checks are labelled `smoke_only` and excluded from aggregates.
+
+On Windows, resume the full local job with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_vlalight_benchmark.ps1
+```
+
+The launcher reads the user-level `TYPESAFE_API_KEY`, prevents duplicate jobs,
+and writes a heartbeat every 30 seconds to `logs/jev_full_job_status.json`.
+Timestamped logs are kept in `logs/benchmark_jobs/`. It checks the real image
+API before starting SUMO; an unavailable API stops the job and preserves existing
+scores. Transient connection errors allow eight retries with exponential delay
+capped at 30 seconds; permanent HTTP rejections such as 401/403/451 stop retries.
+Completed seeds are reused; an unfinished seed restarts from its beginning,
+since this path does not save SUMO state checkpoints. A successful full matrix
+is committed locally on `local/jev-vlalight-benchmark`, without a push or PR.
+
+[Local measurements and protocol](results/vlalight_jev/README.md) include the
+baseline results, image smoke checks, dataset hashes and evaluation limits.
+Only completed real Jev seeds enter its score table; the report shows current
+completion counts and keeps short API preflights separate from model scores.
+The fixed horizon covers departures without clearing the network; unfinished
+trips and teleports must be considered alongside travel time. These SUMO results
+are separate from the historical CityFlow numbers.
 
 ## Tests
 

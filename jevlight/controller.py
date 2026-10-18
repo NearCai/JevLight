@@ -27,8 +27,11 @@ same fallback.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import math
+import uuid
+from pathlib import Path
 import json
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from jevlight.jev_client import JevClient, JevResult
 from jevlight.cooperation import COMMUNICATION_THRESHOLD, TrajectoryRelations
@@ -468,18 +471,26 @@ class JevLightController:
         Returns ``(signal, fallback_reason, confidence, probabilities)``.
         ``fallback_reason`` is ``None`` when the Jev answer is used directly.
         """
-        if answer is None or answer.get("type") != "choice":
+        if not isinstance(answer, dict) or answer.get("type") != "choice":
             signal, reason = self._fallback_signal(observation, "missing_answer")
             return signal, reason, None, None
         signal = answer.get("choice")
-        probabilities = {
-            str(key): float(value)
-            for key, value in (answer.get("probabilities") or {}).items()
-        }
-        confidence = answer.get("confidence")
-        confidence_value = (
-            float(confidence) if confidence is not None else None
-        )
+        try:
+            probabilities = {
+                str(key): float(value)
+                for key, value in (answer.get("probabilities") or {}).items()
+            }
+            confidence = answer.get("confidence")
+            confidence_value = float(confidence) if confidence is not None else None
+            if any(not math.isfinite(p) or not 0 <= p <= 1 for p in probabilities.values()):
+                raise ValueError("invalid probability")
+            if confidence_value is not None and (
+                not math.isfinite(confidence_value) or not 0 <= confidence_value <= 1
+            ):
+                raise ValueError("invalid confidence")
+        except (AttributeError, TypeError, ValueError):
+            signal, reason = self._fallback_signal(observation, "invalid_answer")
+            return signal, reason, None, None
         available = {
             canonical_phase_name(phase) for phase in observation.phases
         }
@@ -723,6 +734,87 @@ class JevLightController:
                 ),
                 canonical_phase_name(observation.phases[0]),
             )
+            self.previous_signals[observation.intersection_id] = signal
+        return actions, traces
+
+    def decide_images(
+        self,
+        observations: Sequence[IntersectionObservation],
+        images: Mapping[str, Path],
+        step: int,
+        prompt: Optional[str] = None,
+    ) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
+        """Make one direct image-plus-prompt decision per intersection.
+
+        ``images`` maps an intersection id to one composite camera image.  No
+        queue, occupancy, or waiting-time state is sent on this path: Jev must
+        read the scene and choose among the phase criteria itself.
+        """
+        if self.client.transport != "official":
+            raise ValueError("image decisions require the official TypeSafe transport")
+        if self.packaging != "per_intersection" or self.fallback != "previous":
+            raise ValueError("image decisions require per_intersection packaging and previous fallback")
+        actions: Dict[str, int] = {}
+        traces: List[Dict[str, Any]] = []
+        requests = []
+        for observation in observations:
+            image = Path(images[observation.intersection_id])
+            ref = str(uuid.uuid4())
+            phase_id = f"{PHASE_QUESTION_PREFIX}{observation.intersection_id}"
+            state = {
+                "intersection_id": observation.intersection_id,
+                "camera_image": ref,
+                "current_phase": canonical_phase_name(observation.current_phase or observation.phases[0]),
+                "control_interval_s": self.phase_duration,
+            }
+            instructions = (
+                "Look at the traffic-camera image referenced by `camera_image`. "
+                "It contains approach views labelled by the direction vehicles "
+                "travel (northbound arrives from the south, and vice versa). "
+                "T means through, L means left turn; right turns are uncontrolled. "
+                f"Choose the next phase for a {self.phase_duration:g}-second control "
+                "interval including 5 seconds of yellow on a phase change. "
+                "Infer demand only from visible vehicles and queues; do not "
+                "infer exact waiting times from a still image. Minimize queues "
+                "and avoid starving an approach. Return one phase from the criteria."
+            )
+            if prompt:
+                instructions += "\nAdditional control instructions: " + prompt
+            questions = {
+                phase_id: {
+                    "type": "choice",
+                    "instructions": instructions,
+                    "criteria": {
+                        phase: description.split(" Prefer when", 1)[0]
+                        for phase, description in phase_criteria(observation).items()
+                    },
+                }
+            }
+            requests.append((observation, image, ref, phase_id, state, questions))
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            results = list(executor.map(
+                lambda item: self.client.evaluate(item[4], item[5], assets={item[2]: item[1]}),
+                requests,
+            ))
+        for (observation, image, ref, phase_id, _state, questions), result in zip(requests, results):
+            self._record_result(result)
+            signal, trace = self._trace_decision(
+                observation, step, phase_id, result.answers.get(phase_id), result
+            )
+            trace.update({
+                "input_mode": "image",
+                "image_asset": ref,
+                "image_path": str(image),
+                "vision_prompt": questions[phase_id]["instructions"],
+                "response_model": result.model,
+                "mock": bool(self.client.mock),
+            })
+            actions[observation.intersection_id] = self._phase_to_action(observation, signal)
+            traces.append(trace)
+
+        for observation in observations:
+            signal = canonical_phase_name(observation.phases[actions[observation.intersection_id]])
             self.previous_signals[observation.intersection_id] = signal
         return actions, traces
 

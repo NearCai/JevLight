@@ -617,7 +617,7 @@ def start_viz_server(
             target=server.serve_forever, name="viz-http", daemon=True
         )
         thread.start()
-        return server, f"http://{host}:{candidate}"
+        return server, f"http://{host}:{server.server_address[1]}"
     raise OSError(f"no free viz port in [{port}, {port + port_tries}): {last_error}")
 
 
