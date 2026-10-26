@@ -447,8 +447,12 @@ The full Jev matrix requires approximately **608,160 image requests before
 retries**, with the model pinned to `jev-1.14.0`. Runs execute serially; each
 control boundary can issue up to eight concurrent intersection requests. Add
 `--datasets jinan --seeds 1` for an initial subset, or `--resume` to reuse
-completed runs with matching data, method, model and renderer revision. Failed
-or fallback image decisions stop that run and cannot enter the score table.
+completed runs with matching data, method, model and renderer revision and
+continue an interrupted image seed. Continuation replays SUMO from the same
+seed, reapplies saved successful phase decisions, and requests only decisions
+missing from the durable trace. The decision log stays with the final result;
+temporary camera frames are removed only after the seed summary is written.
+Failed or fallback image decisions stop that run and cannot enter the score table.
 Mock checks are labelled `smoke_only` and excluded from aggregates.
 
 On Windows, resume the full local job with:
@@ -463,9 +467,10 @@ Timestamped logs are kept in `logs/benchmark_jobs/`. It checks the real image
 API before starting SUMO; an unavailable API stops the job and preserves existing
 scores. Transient connection errors allow eight retries with exponential delay
 capped at 30 seconds; permanent HTTP rejections such as 401/403/451 stop retries.
-Completed seeds are reused; an unfinished seed restarts from its beginning,
-since this path does not save SUMO state checkpoints. A successful full matrix
-is committed locally on `local/jev-vlalight-benchmark`, without a push or PR.
+Completed seeds are reused. An unfinished seed replays SUMO from its beginning
+and reuses its saved successful decisions, so it does not need a SUMO state
+checkpoint. A successful full matrix is committed locally on
+`local/jev-vlalight-benchmark`, without a push or PR.
 
 [Local measurements and protocol](results/vlalight_jev/README.md) include the
 baseline results, image smoke checks, dataset hashes and evaluation limits.

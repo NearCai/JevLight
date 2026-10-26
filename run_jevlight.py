@@ -46,6 +46,7 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 import threading
 import time
@@ -81,9 +82,10 @@ from jevlight.jev_client import (
     DEFAULT_OFFICIAL_BASE_URL,
     JEV_TRANSPORTS,
     JevClient,
+    JevResult,
     resolve_jev_api_key,
 )
-from jevlight.observation import collect_observations
+from jevlight.observation import canonical_phase_name, collect_observations
 from jevlight.rolling_evaluation import RollingMetricRecorder
 from jevlight.viz_server import (
     DEFAULT_VIZ_HOST,
@@ -257,6 +259,7 @@ def parse_args(argv=None):
     parser.add_argument("--render_batch_size", type=int, default=4)
     parser.add_argument("--fail_on_image_fallback", action="store_true",
                         help="Stop an image benchmark after any fallback; preserve the trace")
+    parser.add_argument("--resume_from", type=Path, help=argparse.SUPPRESS)
     parser.add_argument(
         "--dry_run",
         action=argparse.BooleanOptionalAction,
@@ -385,7 +388,43 @@ def load_experiment_defaults(parser, filename):
 def experiment_parameters(args):
     """Reproducible resolved parameters without credentials or preflight flags."""
     return {key: value for key, value in vars(args).items()
-            if key not in {"jev_api_key", "print_config"}}
+            if key not in {"jev_api_key", "print_config", "resume_from"}}
+
+
+def load_image_decision_cache(path):
+    """Keep the last successful image decision for each step/intersection."""
+    decisions = {}
+    try:
+        lines = Path(path).open(encoding="utf-8")
+    except FileNotFoundError:
+        return decisions
+    with lines:
+        for line in lines:
+            try:
+                trace = json.loads(line)
+                key = (int(trace["step"]), trace["intersection"])
+                if (trace.get("input_mode") == "image" and trace.get("signal") and
+                        not trace.get("fallback") and not trace.get("error")):
+                    decisions[key] = trace
+            except (ValueError, TypeError, KeyError):
+                continue
+    return decisions
+
+
+def image_decision_fallback_count(path):
+    latest = {}
+    try:
+        lines = Path(path).open(encoding="utf-8")
+    except FileNotFoundError:
+        return 0
+    with lines:
+        for line in lines:
+            try:
+                trace = json.loads(line)
+                latest[(int(trace["step"]), trace["intersection"])] = trace
+            except (ValueError, TypeError, KeyError):
+                continue
+    return sum(bool(trace.get("fallback")) for trace in latest.values())
 
 
 def build_configs(args, dataset_config, run_id):
@@ -487,8 +526,8 @@ def _run(args, resources):
         raise ValueError("count must be positive")
     if args.image_decisions and args.dry_run:
         raise ValueError("--image_decisions cannot be combined with --dry_run")
-    if args.image_decisions and args.jev_transport != "official":
-        raise ValueError("--image_decisions requires --jev_transport official")
+    if args.image_decisions and args.jev_transport not in ("official", "local"):
+        raise ValueError("--image_decisions requires official or local transport")
     if args.image_decisions:
         if args.packaging not in (None, "per_intersection") or args.fallback != "previous":
             raise ValueError("image mode requires per_intersection packaging and previous fallback")
@@ -546,8 +585,35 @@ def _run(args, resources):
         )
 
     timestamp = time.strftime("%m_%d_%H_%M_%S")
-    run_id = f"jevlight_{Path(args.traffic_file).stem}_{timestamp}_pid{os.getpid()}"
+    if args.resume_from:
+        resume_dir = args.resume_from.resolve()
+        if (not resume_dir.is_relative_to(Path("records").resolve()) or
+                not args.image_decisions or
+                not (resume_dir / "jev_decisions.jsonl").is_file()):
+            raise ValueError("resume_from must identify an image run under records/ with a decision log")
+        run_id = resume_dir.name
+    else:
+        resume_dir = None
+        run_id = f"jevlight_{Path(args.traffic_file).stem}_{timestamp}_pid{os.getpid()}"
     agent_config, env_config, paths = build_configs(args, dataset_config, run_id)
+    if resume_dir and Path(paths["PATH_TO_WORK_DIRECTORY"]).resolve() != resume_dir:
+        raise ValueError("resume_from does not match this experiment's records directory")
+    config_path = Path(paths["PATH_TO_WORK_DIRECTORY"]) / "experiment_config.json"
+    parameters = experiment_parameters(args)
+    if resume_dir:
+        try:
+            saved_parameters = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"cannot validate resume experiment config: {exc}") from exc
+        if saved_parameters != parameters:
+            raise ValueError("resume_from experiment parameters do not match the saved run")
+    else:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(parameters, indent=2), encoding="utf-8")
+    if resume_dir and args.rolling_evaluation:
+        rolling_path = Path(args.evaluation_output_dir or resume_dir).resolve() / "window_results.jsonl"
+        if rolling_path.parent == resume_dir:
+            rolling_path.unlink(missing_ok=True)
 
     min_interval = args.jev_min_interval
     if min_interval is None:
@@ -597,9 +663,6 @@ def _run(args, resources):
     )
     env = simulator.env
     resources.callback(env.end_engine)
-    (Path(paths["PATH_TO_WORK_DIRECTORY"]) / "experiment_config.json").write_text(
-        json.dumps(experiment_parameters(args), indent=2), encoding="utf-8"
-    )
     if args.start_time:
         simulator.reset_env_with_start_time(args.start_time)
 
@@ -674,6 +737,7 @@ def _run(args, resources):
         ):
             logger.define_metric(metric_name, step_metric="final/checkpoint")
     trace_path = Path(paths["PATH_TO_WORK_DIRECTORY"]) / "jev_decisions.jsonl"
+    decision_cache = load_image_decision_cache(trace_path) if resume_dir else {}
     rolling_recorder = None
     if args.rolling_evaluation:
         rolling_recorder = RollingMetricRecorder(
@@ -718,14 +782,47 @@ def _run(args, resources):
                     viz_runtime.wait_until_running()
                 observations = collect_observations(env)
                 if args.image_decisions:
+                    reusable = {
+                        observation.intersection_id: decision_cache[(step, observation.intersection_id)]
+                        for observation in observations
+                        if (step, observation.intersection_id) in decision_cache and
+                        decision_cache[(step, observation.intersection_id)]["signal"] in {
+                            canonical_phase_name(phase) for phase in observation.phases
+                        }
+                    }
+                    pending = [observation for observation in observations
+                               if observation.intersection_id not in reusable]
                     image_paths = image_renderer.capture(
                         env.traci_conn,
                         [observation.intersection_id for observation in observations],
                         step,
+                    ) if pending else {}
+                    actions = {
+                        observation.intersection_id: next(
+                            index for index, phase in enumerate(observation.phases)
+                            if canonical_phase_name(phase) == reusable[observation.intersection_id]["signal"]
+                        )
+                        for observation in observations if observation.intersection_id in reusable
+                    }
+                    for intersection_id, trace in reusable.items():
+                        controller.previous_signals[intersection_id] = trace["signal"]
+                        controller._record_result(JevResult(
+                            model=trace.get("response_model"),
+                            input_tokens=int(trace.get("request_input_tokens") or 0),
+                            output_tokens=int(trace.get("request_output_tokens") or 0),
+                            latency=float(trace.get("request_latency") or 0),
+                        ))
+
+                    def save_decision(trace):
+                        trace_file.write(json.dumps(trace, ensure_ascii=False) + "\n")
+                        trace_file.flush()
+                        os.fsync(trace_file.fileno())
+
+                    new_actions, traces = controller.decide_images(
+                        pending, image_paths, step, prompt=args.image_prompt,
+                        on_decision=save_decision,
                     )
-                    actions, traces = controller.decide_images(
-                        observations, image_paths, step, prompt=args.image_prompt
-                    )
+                    actions.update(new_actions)
                 else:
                     actions, traces = controller.decide(observations, step)
                 step_duration = args.duration
@@ -738,9 +835,10 @@ def _run(args, resources):
                 total_reward += float(sum(rewards))
                 if viz_runtime is not None:
                     viz_runtime.publish(env.traci_conn)
-                for trace in traces:
-                    trace_file.write(json.dumps(trace, ensure_ascii=False) + "\n")
-                trace_file.flush()
+                if not args.image_decisions:
+                    for trace in traces:
+                        trace_file.write(json.dumps(trace, ensure_ascii=False) + "\n")
+                    trace_file.flush()
                 if args.image_decisions and args.fail_on_image_fallback and any(
                     trace.get("fallback") or trace.get("error") for trace in traces
                 ):
@@ -777,10 +875,7 @@ def _run(args, resources):
     safe_wandb_finish(logger)
     summary_path = Path(paths["PATH_TO_WORK_DIRECTORY"]) / "summary.json"
     fallback_count = 0
-    with trace_path.open(encoding="utf-8") as traces:
-        for line in traces:
-            if line.strip():
-                fallback_count += bool(json.loads(line).get("fallback"))
+    fallback_count = image_decision_fallback_count(trace_path) if args.image_decisions else 0
     try:
         revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
         dirty = bool(subprocess.check_output(["git", "diff", "HEAD", "--stat"], text=True).strip())
@@ -825,6 +920,8 @@ def _run(args, resources):
         ),
         encoding="utf-8",
     )
+    if args.image_decisions:
+        shutil.rmtree(Path(paths["PATH_TO_WORK_DIRECTORY"]) / "vision_frames", ignore_errors=True)
     if viz_runtime is not None and args.viz_hold:
         print("[viz] holding the final 3D state — Ctrl-C to exit", flush=True)
         try:

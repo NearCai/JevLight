@@ -57,6 +57,12 @@ def save_json(path, value):
     temporary.replace(path)
 
 
+def find_interrupted_run(record_dir):
+    traces = sorted(record_dir.glob("*/jev_decisions.jsonl"), key=lambda path: path.stat().st_mtime)
+    return next((path.parent for path in reversed(traces)
+                 if not (path.parent / "summary.json").exists()), None)
+
+
 def check_image_api(output, retries=8):
     from PIL import Image
     from jevlight.jev_client import JevClient
@@ -271,9 +277,12 @@ def main():
                     print(f"Reusing {case['id']} seed {seed}: {status}", flush=True)
                     return {"case": case["id"], "seed": seed, "status": status,
                             "summary_path": str(path.relative_to(ROOT)), "summary": summary}
+        interrupted = find_interrupted_run(record_dir) if args.resume and args.method in (*OPEN_VISION_MODELS, "jev-image", "smoke") else None
         command = [sys.executable, "run_jevlight.py", "--dataset", case["dataset"],
                    "--traffic_file", case["traffic_file"], "--count", str(case["horizon_s"]),
                    "--seed", str(seed), "--duration", "15", "--rolling_evaluation", "--memo", memo]
+        if interrupted:
+            command += ["--resume_from", str(interrupted)]
         if args.method == "maxpressure":
             command += ["--dry_run"]
         elif args.method in OPEN_VISION_MODELS:

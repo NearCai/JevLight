@@ -26,7 +26,7 @@ same fallback.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
 import uuid
 from pathlib import Path
@@ -743,6 +743,7 @@ class JevLightController:
         images: Mapping[str, Path],
         step: int,
         prompt: Optional[str] = None,
+        on_decision=None,
     ) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
         """Make one direct image-plus-prompt decision per intersection.
 
@@ -750,8 +751,8 @@ class JevLightController:
         queue, occupancy, or waiting-time state is sent on this path: Jev must
         read the scene and choose among the phase criteria itself.
         """
-        if self.client.transport != "official":
-            raise ValueError("image decisions require the official TypeSafe transport")
+        if self.client.transport not in ("official", "local"):
+            raise ValueError("image decisions require the official or local transport")
         if self.packaging != "per_intersection" or self.fallback != "previous":
             raise ValueError("image decisions require per_intersection packaging and previous fallback")
         actions: Dict[str, int] = {}
@@ -792,26 +793,34 @@ class JevLightController:
             }
             requests.append((observation, image, ref, phase_id, state, questions))
 
+        trace_by_id = {}
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            results = list(executor.map(
-                lambda item: self.client.evaluate(item[4], item[5], assets={item[2]: item[1]}),
-                requests,
-            ))
-        for (observation, image, ref, phase_id, _state, questions), result in zip(requests, results):
-            self._record_result(result)
-            signal, trace = self._trace_decision(
-                observation, step, phase_id, result.answers.get(phase_id), result
-            )
-            trace.update({
-                "input_mode": "image",
-                "image_asset": ref,
-                "image_path": str(image),
-                "vision_prompt": questions[phase_id]["instructions"],
-                "response_model": result.model,
-                "mock": bool(self.client.mock),
-            })
-            actions[observation.intersection_id] = self._phase_to_action(observation, signal)
-            traces.append(trace)
+            futures = {
+                executor.submit(
+                    self.client.evaluate, item[4], item[5], assets={item[2]: item[1]}
+                ): item for item in requests
+            }
+            for future in as_completed(futures):
+                observation, image, ref, phase_id, _state, questions = futures[future]
+                result = future.result()
+                self._record_result(result)
+                signal, trace = self._trace_decision(
+                    observation, step, phase_id, result.answers.get(phase_id), result
+                )
+                trace.update({
+                    "input_mode": "image",
+                    "image_asset": ref,
+                    "image_path": str(image),
+                    "vision_prompt": questions[phase_id]["instructions"],
+                    "response_model": result.model,
+                    "mock": bool(self.client.mock),
+                })
+                if on_decision is not None:
+                    on_decision(trace)
+                actions[observation.intersection_id] = self._phase_to_action(observation, signal)
+                trace_by_id[observation.intersection_id] = trace
+        traces = [trace_by_id[observation.intersection_id] for observation in observations
+                  if observation.intersection_id in trace_by_id]
 
         for observation in observations:
             signal = canonical_phase_name(observation.phases[actions[observation.intersection_id]])

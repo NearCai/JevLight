@@ -87,6 +87,18 @@ def test_open_vision_candidates_have_separate_system_one_endpoints():
     assert len(set(OPEN_VISION_BASE_URLS.values())) == 3
 
 
+def test_resume_selects_latest_interrupted_run_only(tmp_path):
+    from scripts.benchmark_vlalight_jev import find_interrupted_run
+    old = tmp_path / "old"
+    complete = tmp_path / "complete"
+    latest = tmp_path / "latest"
+    for directory in (old, complete, latest):
+        directory.mkdir()
+        (directory / "jev_decisions.jsonl").write_text("")
+    (complete / "summary.json").write_text("{}")
+    assert find_interrupted_run(tmp_path) == latest
+
+
 def test_incomplete_mock_and_fallback_runs_cannot_be_scores():
     case = build_cases()[0]
     summary = valid_image_summary(case)

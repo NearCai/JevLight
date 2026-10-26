@@ -1,6 +1,7 @@
 """Image protocol and policy checks; no external API, browser, or SUMO needed."""
 
 import json
+import time
 from types import SimpleNamespace
 
 from PIL import Image
@@ -138,7 +139,10 @@ def test_image_policy_includes_empty_junctions_without_numeric_oracle(image_path
     observation = make_observation(empty=True, queue_by_phase={"ETWT": 999})
     client = ImageStub(phase_answer("NTST"))
     controller = JevLightController(client, 15, packaging="per_intersection")
-    actions, traces = controller.decide_images([observation], {"i0": image_path}, 3, "Prevent spillback.")
+    saved = []
+    actions, traces = controller.decide_images(
+        [observation], {"i0": image_path}, 3, "Prevent spillback.", on_decision=saved.append
+    )
     assert actions == {"i0": 1}
     assert len(client.calls) == 1
     state, questions, assets = client.calls[0]
@@ -150,6 +154,49 @@ def test_image_policy_includes_empty_junctions_without_numeric_oracle(image_path
     assert traces[0]["input_mode"] == "image"
     assert traces[0]["fallback"] is None
     assert traces[0]["mock"] is True
+    assert saved == traces
+
+
+def test_local_transport_can_make_image_decisions(image_path):
+    client = JevClient(transport="local", mock=True)
+    controller = JevLightController(client, 15, packaging="per_intersection")
+    actions, traces = controller.decide_images([make_observation()], {"i0": image_path}, 0)
+    assert actions == {"i0": 0}
+    assert traces[0]["fallback"] is None
+
+
+def test_image_decisions_checkpoint_as_each_request_finishes(image_path):
+    class OutOfOrderClient(JevClient):
+        def __init__(self):
+            super().__init__(transport="local", mock=True)
+
+        def evaluate(self, state, questions, assets=None):
+            if state["intersection_id"] == "i0":
+                time.sleep(0.05)
+            key = next(iter(questions))
+            return JevResult(answers={key: phase_answer("ETWT")})
+
+    controller = JevLightController(
+        OutOfOrderClient(), 15, packaging="per_intersection", max_workers=2
+    )
+    saved = []
+    controller.decide_images(
+        [make_observation("i0"), make_observation("i1")],
+        {"i0": image_path, "i1": image_path}, 0, on_decision=saved.append,
+    )
+    assert [trace["intersection"] for trace in saved] == ["i1", "i0"]
+
+
+def test_resume_cache_ignores_failed_records_and_keeps_latest_success(tmp_path):
+    from run_jevlight import image_decision_fallback_count, load_image_decision_cache
+
+    path = tmp_path / "jev_decisions.jsonl"
+    failed = {"step": 0, "intersection": "i0", "input_mode": "image",
+              "signal": "ETWT", "fallback": "missing_answer"}
+    recovered = {**failed, "signal": "NTST", "fallback": None, "error": None}
+    path.write_text("{interrupted\n" + json.dumps(failed) + "\n" + json.dumps(recovered) + "\n")
+    assert load_image_decision_cache(path)[(0, "i0")] == recovered
+    assert image_decision_fallback_count(path) == 0
 
 
 @pytest.mark.parametrize("answer", [None, "invalid", {"type": "choice", "choice": "BAD"},
