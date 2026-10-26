@@ -25,8 +25,11 @@ jevlight.local_server --help``.
 from __future__ import annotations
 
 import argparse
+import base64
+from io import BytesIO
 import json
 import math
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -348,6 +351,57 @@ class MockBackend:
         }
 
 
+class RBDashBackend:
+    """Adapt RBDash's typed image classifier to the local System One API."""
+
+    def __init__(self, model_id: str):
+        try:
+            from rbdash_decision import RBDashDecision
+        except ImportError as exc:
+            raise RuntimeError(
+                "Install the RBDash model package and add its directory to PYTHONPATH"
+            ) from exc
+        self.model_id = model_id
+        self.model = RBDashDecision.from_pretrained(model_id)
+        self._lock = threading.Lock()
+
+    def evaluate_images(self, state: Any, questions: Mapping[str, Mapping[str, Any]],
+                        images: List[str]) -> Dict[str, Any]:
+        if len(images) != 1:
+            raise ValueError("RBDash benchmark adapter expects exactly one camera image")
+        header, separator, encoded = images[0].partition(",")
+        if not separator or header not in ("data:image/jpeg;base64", "data:image/png;base64"):
+            raise ValueError("images must contain a JPEG or PNG data URL")
+        image_bytes = base64.b64decode(encoded, validate=True)
+        if len(image_bytes) > 16 * 1024 * 1024:
+            raise ValueError("image exceeds the 16 MiB limit")
+        from PIL import Image
+        with Image.open(BytesIO(image_bytes)) as image:
+            if image.format not in ("JPEG", "PNG") or getattr(image, "n_frames", 1) != 1:
+                raise ValueError("images must be still JPEG or PNG files")
+            image.verify()
+        state = {key: value for key, value in state.items() if key != "camera_image"} if isinstance(state, Mapping) else state
+        answers = {}
+        with self._lock:
+            for question_id, question in questions.items():
+                criteria = question.get("criteria") or {}
+                if question.get("type") != "choice" or not isinstance(criteria, Mapping) or not criteria:
+                    raise ValueError("RBDash adapter supports non-empty choice questions only")
+                result = self.model.decide(
+                    question=str(question.get("instructions", "")),
+                    options=criteria, state=state, images=[images[0]],
+                )
+                choice = result.get("choice")
+                probabilities = result.get("probabilities")
+                if choice not in criteria or not isinstance(probabilities, Mapping):
+                    raise ValueError("RBDash returned an invalid typed choice")
+                answers[question_id] = {"type": "choice", "choice": choice,
+                    "probabilities": {key: float(probabilities[key]) for key in criteria},
+                    "confidence": float(probabilities[choice])}
+        return {"model": self.model_id, "answers": answers,
+                "usage": {"input_tokens": 0, "output_tokens": 0}}
+
+
 # ---------------------------------------------------------------------- #
 # HTTP server
 # ---------------------------------------------------------------------- #
@@ -385,6 +439,9 @@ def make_handler(backend: Any, model_name: Optional[str]):
                 return
             try:
                 length = int(self.headers.get("Content-Length") or 0)
+                if not 0 < length <= 32 * 1024 * 1024:
+                    self._send(413, {"error": {"message": "request body must be 1 to 32 MiB"}})
+                    return
                 request = json.loads(self.rfile.read(length) or b"{}")
             except (ValueError, json.JSONDecodeError) as exc:
                 self._send(400, {"error": {"message": f"bad request body: {exc}"}})
@@ -418,7 +475,20 @@ def make_handler(backend: Any, model_name: Optional[str]):
                 return
             started = time.time()
             try:
-                outcome = backend.evaluate(state, questions)
+                images = request.get("images")
+                if images is not None:
+                    evaluator = getattr(backend, "evaluate_images", None)
+                    if not callable(evaluator):
+                        self._send(400, {"error": {"message": "this backend does not support images"}})
+                        return
+                    if not isinstance(images, list) or not all(isinstance(image, str) for image in images):
+                        self._send(400, {"error": {"message": "images must be a list of data URLs"}})
+                        return
+                    if isinstance(state, dict) and "camera_image" in state:
+                        state = {key: value for key, value in state.items() if key != "camera_image"}
+                    outcome = evaluator(state, questions, images)
+                else:
+                    outcome = backend.evaluate(state, questions)
             except Exception as exc:  # noqa: BLE001 - reported to the client
                 self._send(502, {
                     "error": {
@@ -468,11 +538,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
     parser.add_argument(
         "--backend",
-        choices=("vllm", "mock"),
+        choices=("vllm", "mock", "rbdash"),
         default="vllm",
         help=(
             "vllm: score questions on an OpenAI-compatible completions "
-            "endpoint; mock: deterministic max-pressure answers (no GPU)"
+            "endpoint; mock: deterministic max-pressure answers (no GPU); "
+            "rbdash: local RBDash-Decision image classifier"
         ),
     )
     parser.add_argument("--host", default=DEFAULT_HOST)
@@ -504,6 +575,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     if args.backend == "mock":
         backend = MockBackend(model=args.model)
+    elif args.backend == "rbdash":
+        backend = RBDashBackend(args.model or "RBDash-Team/RBDash-Decision-v0.2")
     else:
         backend = VllmBackend(
             base_url=args.vllm_base_url,

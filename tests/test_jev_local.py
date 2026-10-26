@@ -24,6 +24,7 @@ from jevlight.jev_client import (
 )
 from jevlight.local_server import (
     MockBackend,
+    RBDashBackend,
     VllmBackend,
     choice_prompt,
     label_logprob,
@@ -36,6 +37,37 @@ from tests.test_jevlight_controller import (
     make_observation,
     phase_answer,
 )
+
+
+def test_rbdash_backend_maps_choice_probabilities_to_system_one(monkeypatch):
+    class FakeDecision:
+        @classmethod
+        def from_pretrained(cls, model_id):
+            assert model_id == "RBDash-Team/RBDash-Decision-v0.2"
+            return cls()
+
+        def decide(self, **kwargs):
+            assert kwargs["question"] == "choose phase"
+            assert kwargs["options"] == {"ETWT": "east/west", "NTST": "north/south"}
+            assert kwargs["state"] == {"current_phase": "ETWT"}
+            assert len(kwargs["images"]) == 1
+            return {"choice": "ETWT", "probabilities": {"ETWT": 0.8, "NTST": 0.2}}
+
+    import sys
+    monkeypatch.setitem(sys.modules, "rbdash_decision", type("Module", (), {"RBDashDecision": FakeDecision}))
+    from PIL import Image
+    import base64
+    from io import BytesIO
+    image = BytesIO()
+    Image.new("RGB", (300, 300), "white").save(image, format="JPEG")
+    data_url = "data:image/jpeg;base64," + base64.b64encode(image.getvalue()).decode()
+    answer = RBDashBackend("RBDash-Team/RBDash-Decision-v0.2").evaluate_images(
+        {"camera_image": "camera", "current_phase": "ETWT"},
+        {"phase": {"type": "choice", "instructions": "choose phase",
+                     "criteria": {"ETWT": "east/west", "NTST": "north/south"}}},
+        [data_url],
+    )
+    assert answer["answers"]["phase"]["confidence"] == 0.8
 
 
 def completions_response(top_logprobs: Dict[str, float], text: str = "") -> Dict[str, Any]:
@@ -417,6 +449,39 @@ class TestSystemOneHttp:
             assert body["answers"]["phase_i0"]["choice"] == "ETWT"
             assert body["answers"]["congested_i0"]["noul"] == 0.25
             assert body["usage"]["input_tokens"] == 1024
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_systemone_image_request_uses_image_backend(self):
+        class ImageBackend:
+            def evaluate_images(self, state, questions, images):
+                assert state == {"current_phase": "ETWT"}
+                assert len(images) == 1 and images[0].startswith("data:image/jpeg;base64,")
+                return {"model": "image-test", "answers": {
+                    "phase": {"type": "choice", "choice": "ETWT",
+                                "probabilities": {"ETWT": 0.9, "NTST": 0.1},
+                                "confidence": 0.9}},
+                    "usage": {"input_tokens": 0, "output_tokens": 0}}
+
+        from PIL import Image
+        import base64
+        from io import BytesIO
+        image = BytesIO()
+        Image.new("RGB", (300, 300), "white").save(image, format="JPEG")
+        data_url = "data:image/jpeg;base64," + base64.b64encode(image.getvalue()).decode()
+        server = make_server(ImageBackend(), host="127.0.0.1", port=0, model_name="image-test")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            response = requests.post(f"http://127.0.0.1:{server.server_address[1]}/v1/systemone",
+                json={"state": {"camera_image": "frame", "current_phase": "ETWT"},
+                      "images": [data_url],
+                      "questions": {"phase": {"type": "choice",
+                          "criteria": {"ETWT": "east-west", "NTST": "north-south"}}}},
+                timeout=5)
+            response.raise_for_status()
+            assert response.json()["answers"]["phase"]["choice"] == "ETWT"
         finally:
             server.shutdown()
             server.server_close()

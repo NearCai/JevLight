@@ -6,7 +6,9 @@ import numpy as np
 import pytest
 
 from jevlight.vlalight_images import compose_views, tls_camera_info, VLALightRenderer
-from scripts.benchmark_vlalight_jev import build_cases, validate_summary, aggregate
+from scripts.benchmark_vlalight_jev import (
+    OPEN_VISION_BASE_URLS, OPEN_VISION_MODELS, build_cases, validate_summary, aggregate,
+)
 from scripts.fetch_vlalight_renderer import REVISION, blob_hash, selected
 
 
@@ -44,13 +46,20 @@ def test_manifest_fetch_selects_renderer_without_training_or_accident_models():
     assert blob_hash(b"test\n") == "9daeafb9864cf43055ae93beb0afd6c7d144bfa4"
 
 
-def test_plan_covers_long_departures_and_all_available_scenarios():
+def test_plan_contains_only_the_seven_selected_traffic_flows():
     cases = build_cases()
-    assert len(cases) == 10
-    assert {c["dataset"] for c in cases} == {"jinan", "hangzhou", "newyork", "newyork_16x3"}
+    assert len(cases) == 7
+    assert {c["id"] for c in cases} == {
+        "jinan/anon_3_4_jinan_real",
+        "jinan/anon_3_4_jinan_real_2000",
+        "jinan/anon_3_4_jinan_real_2500",
+        "hangzhou/anon_4_4_hangzhou_real",
+        "hangzhou/anon_4_4_hangzhou_real_5816",
+        "newyork/anon_28_7_newyork_real_double",
+        "newyork/anon_28_7_newyork_real_triple",
+    }
     assert {c["horizon_s"] for c in cases if c["dataset"] == "newyork"} == {3900}
-    assert next(c for c in cases if "24h" in c["id"])["horizon_s"] == 86400
-    assert sum(c["image_requests_per_seed"] for c in cases) * 3 == 608160
+    assert sum(c["image_requests_per_seed"] for c in cases) * 3 == 354720
 
 
 def valid_image_summary(case):
@@ -60,6 +69,22 @@ def valid_image_summary(case):
             "jev_transport": "official", "jev_model": "jev-1.14.0",
             "renderer_metadata": {"revision": REVISION},
             "fallback_count": 0, "jev": {"requests": case["image_requests_per_seed"], "failures": 0}}
+
+
+@pytest.mark.parametrize(("method", "transport", "model"), [
+    (method, "local", model) for method, model in OPEN_VISION_MODELS.items()
+])
+def test_open_vision_summaries_are_validated_for_selected_models(method, transport, model):
+    case = build_cases()[0]
+    summary = {**valid_image_summary(case), "jev_transport": transport, "jev_model": model}
+    assert validate_summary(summary, case, 1, method) == "complete"
+    assert validate_summary({**summary, "jev_model": "wrong-model"}, case, 1, method) == "invalid_method"
+
+
+def test_open_vision_candidates_have_separate_system_one_endpoints():
+    assert set(OPEN_VISION_MODELS) == {"rbdash-decision", "d3-turbo", "amos-1-large"}
+    assert set(OPEN_VISION_BASE_URLS) == set(OPEN_VISION_MODELS)
+    assert len(set(OPEN_VISION_BASE_URLS.values())) == 3
 
 
 def test_incomplete_mock_and_fallback_runs_cannot_be_scores():
@@ -100,6 +125,28 @@ def test_report_does_not_trust_mock_runs_labelled_as_real_scores(tmp_path):
     report = (tmp_path / "README.md").read_text(encoding="utf-8")
     assert "real Jev: **0/1**" in report
     assert "pending | pending | pending" in report
+
+
+def test_report_includes_each_open_vision_method_when_results_exist(tmp_path):
+    from scripts.report_vlalight_jev import write_report
+    case = build_cases()[0]
+    plan = {"method": "jev-image", "seeds": [1], "cases": [case],
+            "estimated_image_requests": case["image_requests_per_seed"]}
+    (tmp_path / "plan_jev-image.json").write_text(json.dumps(plan))
+    method = "d3-turbo"
+    summary = {**valid_image_summary(case), "jev_transport": "local",
+               "jev_model": OPEN_VISION_MODELS[method]}
+    for field in ("avg_travel_time", "avg_waiting_time", "avg_queue_len",
+                  "arrived_vehicle_count", "running_vehicle_count", "pending_vehicle_count"):
+        summary[f"final/{field}"] = 1
+    method_plan = {**plan, "method": method}
+    (tmp_path / f"{method}.json").write_text(json.dumps({
+        "plan": method_plan, "runs": [{"case": case["id"], "seed": 1,
+                                      "status": "complete", "summary": summary}]}))
+    write_report(tmp_path)
+    report = (tmp_path / "README.md").read_text(encoding="utf-8")
+    assert "## `d3-turbo` results" in report
+    assert case["id"] in report
 
 
 def test_api_preflight_failure_preserves_saved_results(monkeypatch, tmp_path):

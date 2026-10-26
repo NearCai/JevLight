@@ -10,7 +10,7 @@ import statistics
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.benchmark_vlalight_jev import aggregate, validate_summary
+from scripts.benchmark_vlalight_jev import OPEN_VISION_MODELS, aggregate, validate_summary
 
 
 def read_result(directory, method):
@@ -57,6 +57,7 @@ def write_report(directory):
     baseline = read_result(directory, "maxpressure")
     jev = read_result(directory, "jev-image")
     smoke = read_result(directory, "smoke")
+    open_results = {method: read_result(directory, method) for method in OPEN_VISION_MODELS}
     expected = len(plan["cases"]) * len(plan["seeds"])
     baseline_runs, jev_runs = checked_runs(baseline), checked_runs(jev)
     counts = [sum(r["status"] == "complete" for r in runs) for runs in (baseline_runs, jev_runs)]
@@ -107,6 +108,10 @@ def write_report(directory):
                            "final/pending_vehicle_count", "teleport_count")]
                 lines.append(f"| {method} / `{case['id']}` | {len(summaries)} | " +
                              " | ".join(f"{value:.1f}" for value in values) + " |")
+    for method, result in open_results.items():
+        if result:
+            lines.extend(["", f"## `{method}` results", "",
+                          score_table(result, result["plan"]), ""])
     if smoke:
         smoke_runs = checked_runs(smoke)
         requests = sum(r["summary"]["jev"]["requests"] for r in smoke_runs if r["status"] == "smoke_only")

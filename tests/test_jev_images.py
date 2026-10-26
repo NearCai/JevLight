@@ -116,10 +116,9 @@ def test_asset_keys_do_not_count_as_references(image_path):
         JevClient._image_parts({"state": {"ref": 1}, "questions": {}}, {"ref": image_path})
 
 
-@pytest.mark.parametrize("transport", ["mcp", "local"])
-def test_image_transport_must_be_explicit(transport, image_path):
+def test_image_transport_must_be_explicit(image_path):
     with pytest.raises(ValueError, match="official"):
-        JevClient(transport=transport, mock=True).evaluate({"x": "ref"}, {}, assets={"ref": image_path})
+        JevClient(transport="mcp", mock=True).evaluate({"x": "ref"}, {}, assets={"ref": image_path})
 
 
 class ImageStub(JevClient):

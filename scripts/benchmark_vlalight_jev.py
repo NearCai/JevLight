@@ -24,6 +24,32 @@ sys.path.insert(0, str(ROOT))
 from jevlight.config import DATASETS
 from scripts.fetch_vlalight_renderer import REVISION as RENDERER_REVISION
 
+OPEN_VISION_MODELS = {
+    "rbdash-decision": "RBDash-Team/RBDash-Decision-v0.2",
+    "d3-turbo": "vllm-sr/d3-turbo",
+    "amos-1-large": "amos-1-large",
+}
+OPEN_VISION_BASE_URLS = {
+    "rbdash-decision": "http://127.0.0.1:8125",
+    "d3-turbo": "http://127.0.0.1:8899",
+    "amos-1-large": "http://127.0.0.1:8000",
+}
+BENCHMARK_TRAFFIC_FILES = {
+    "jinan": {
+        "anon_3_4_jinan_real.rou.xml",
+        "anon_3_4_jinan_real_2000.rou.xml",
+        "anon_3_4_jinan_real_2500.rou.xml",
+    },
+    "hangzhou": {
+        "anon_4_4_hangzhou_real.rou.xml",
+        "anon_4_4_hangzhou_real_5816.rou.xml",
+    },
+    "newyork": {
+        "anon_28_7_newyork_real_double.rou.xml",
+        "anon_28_7_newyork_real_triple.rou.xml",
+    },
+}
+
 
 def save_json(path, value):
     temporary = path.with_name(path.name + ".tmp")
@@ -58,6 +84,40 @@ def check_image_api(output, retries=8):
     return error
 
 
+def check_open_image_model(output, method, base_url, retries=2):
+    from PIL import Image
+    from jevlight.jev_client import JevClient
+
+    model = OPEN_VISION_MODELS[method]
+    probe_dir = ROOT / "logs" / "benchmark_vlalight"
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    image = probe_dir / "open_model_preflight.jpg"
+    Image.new("RGB", (768, 1440), "gray").save(image)
+    result = JevClient(transport="local", model=model, base_url=base_url,
+                       max_retries=retries).evaluate(
+        {"camera_image": "open-model-preflight", "current_phase": "ETWT"},
+        {"probe": {"type": "choice",
+                    "instructions": "Choose wait for an empty traffic scene.",
+                    "criteria": {"go": "Vehicles can proceed",
+                                   "wait": "No visible traffic"}}},
+        assets={"open-model-preflight": image},
+    )
+    error = result.error
+    answer = result.answers.get("probe")
+    expected_reported_model = model if method == "rbdash-decision" else model.rsplit("/", 1)[-1]
+    if not error and result.model and result.model not in {model, expected_reported_model}:
+        error = f"Model mismatch: expected {model!r}, got {result.model!r}"
+    if not error and (not isinstance(answer, dict) or answer.get("choice") not in {"go", "wait"}):
+        error = "Open vision model returned an invalid choice"
+    record = {"checked_at": datetime.now().astimezone().isoformat(),
+              "status": "blocked_local_model" if error else "ready", "error": error,
+              "model": result.model, "requested_model": model,
+              "input_tokens": result.input_tokens, "output_tokens": result.output_tokens,
+              "latency_s": result.latency}
+    save_json(output / f"preflight_{method}.json", record)
+    return error
+
+
 def build_cases():
     cases = []
     for dataset, config in DATASETS.items():
@@ -65,6 +125,8 @@ def build_cases():
         if not (data / config["roadnet_file"]).is_file():
             continue
         for filename in config["traffic_files"]:
+            if filename not in BENCHMARK_TRAFFIC_FILES.get(dataset, set()):
+                continue
             path = data / filename
             if not path.is_file():
                 continue
@@ -101,8 +163,10 @@ def validate_summary(summary, case, seed, method):
                               not summary.get("image_decisions")) else "invalid_method"
     if not summary.get("image_decisions") or summary.get("image_renderer") != "vlalight":
         return "invalid_method"
-    if (summary.get("jev_transport") != "official" or
-            summary.get("jev_model") != "jev-1.14.0" or
+    expected_transport = "local" if method in OPEN_VISION_MODELS else "official"
+    expected_model = OPEN_VISION_MODELS.get(method, "jev-1.14.0")
+    if (summary.get("jev_transport") != expected_transport or
+            summary.get("jev_model") != expected_model or
             summary.get("renderer_metadata", {}).get("revision") != RENDERER_REVISION):
         return "invalid_method"
     expected_mock = method == "smoke"
@@ -134,13 +198,14 @@ def aggregate(runs):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--method", choices=("maxpressure", "jev-image", "smoke"), default="jev-image")
+    parser.add_argument("--method", choices=("maxpressure", "jev-image", "smoke", *OPEN_VISION_MODELS), default="jev-image")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--seeds", nargs="+", type=int, default=[1, 2, 3])
     parser.add_argument("--datasets", nargs="+")
     parser.add_argument("--output", type=Path, default=Path("results/vlalight_jev"))
     parser.add_argument("--workers", type=int, default=1, choices=(1, 2))
     parser.add_argument("--vlalight_root", default="logs/vlalight-source/VLALight")
+    parser.add_argument("--jev_base_url", default=None, help="Local System One model endpoint")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--jev_retries", type=int, default=8)
     args = parser.parse_args()
@@ -167,7 +232,8 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     plan = {"method": args.method, "seeds": args.seeds, "control_interval_s": 15,
             "yellow_time_s": 5, "cases": cases,
-            "jev_retries": args.jev_retries if args.method == "jev-image" else 0,
+            "model": OPEN_VISION_MODELS.get(args.method, "jev-1.14.0" if args.method in ("jev-image", "smoke") else None),
+            "jev_retries": args.jev_retries if args.method in ("jev-image", *OPEN_VISION_MODELS) else 0,
             "estimated_image_requests": sum(c["image_requests_per_seed"] for c in cases) * len(args.seeds),
             "protocol": "fixed departure horizon; no clearance; unfinished trips are censored",
             "execute": args.execute}
@@ -181,6 +247,12 @@ def main():
         error = check_image_api(args.output, retries=args.jev_retries)
         if error:
             parser.error(f"Image API preflight failed; existing results preserved: {error}")
+    elif args.method in OPEN_VISION_MODELS:
+        base_url = (args.jev_base_url or os.environ.get("JEV_OPEN_VISION_BASE_URL")
+                    or OPEN_VISION_BASE_URLS[args.method])
+        error = check_open_image_model(args.output, args.method, base_url, retries=args.jev_retries)
+        if error:
+            parser.error(f"Open vision model preflight failed; existing results preserved: {error}")
 
     def execute(item):
         case, seed = item
@@ -204,6 +276,11 @@ def main():
                    "--seed", str(seed), "--duration", "15", "--rolling_evaluation", "--memo", memo]
         if args.method == "maxpressure":
             command += ["--dry_run"]
+        elif args.method in OPEN_VISION_MODELS:
+            command += ["--jev_transport", "local", "--image_decisions", "--image_renderer", "vlalight",
+                        "--vlalight_root", args.vlalight_root, "--jev_model", OPEN_VISION_MODELS[args.method],
+                        "--jev_retries", str(args.jev_retries), "--fail_on_image_fallback",
+                        "--jev_base_url", base_url]
         else:
             command += ["--jev_transport", "official", "--image_decisions", "--image_renderer", "vlalight",
                         "--vlalight_root", args.vlalight_root, "--jev_model", "jev-1.14.0",

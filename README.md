@@ -484,3 +484,48 @@ python -m pytest tests/ -q
 ## Provenance
 
 The observation semantics (`collect_observations`), the local phase ranking (`rank_phases`), the SUMO runtime, the metrics, and the runner's control loop come from ChatLight's migrated LLMLight / CoLLMLight inference paths; Jev replaces the text-completion LLM as the decision model.
+
+### Open-weight Vision Decision Index models
+
+This branch supports three recent open-weight decision models from the [Vision
+board](https://huggingface.co/spaces/multimodalart/jev-decision-index), edition
+0.4 (generated 2026-10-22). Its Full score combines public and maintainer-run
+private vision tests; it is a selection signal, not a guarantee of traffic
+control performance.
+
+| Method | Checkpoint | Vision Full | Serving path |
+| --- | --- | ---: | --- |
+| `rbdash-decision` | [RBDash-Decision v0.2](https://huggingface.co/RBDash-Team/RBDash-Decision-v0.2) | 73.30 | This repo's `rbdash` System One bridge |
+| `d3-turbo` | [vLLM-SR d3-turbo](https://huggingface.co/vllm-sr/d3-turbo) | 72.46 | Upstream System One server |
+| `amos-1-large` | [Amos 1 Large](https://huggingface.co/mukaddamzaid/amos-1-large) | 72.40 | Upstream System One server |
+
+All three model cards specify Apache-2.0. Their benchmark plans contain only
+the seven selected route files and use separate outputs and preflights.
+
+These are 27B-class checkpoints and need a large-memory GPU. RBDash documents
+about 60 GB free GPU memory for bfloat16; Amos documents an 80 GB GPU. d3-turbo's
+published performance uses one AMD MI325X and its upstream Engine serving path.
+The 8 GB RTX 5060 Laptop GPU is not sufficient for local full-weight inference.
+Run model serving on a suitable GPU server and point this benchmark host at it.
+
+For d3-turbo, follow the upstream install and start instructions and expose its
+System One API on port 8899. For Amos, download the checkpoint, install its
+`serve/` package and start the server on port 8000 as described in its model
+card. RBDash needs a separate model environment with PyTorch, Transformers
+5.17+, safetensors, Pillow and upstream `rbdash_decision.py`; put that module
+directory on `PYTHONPATH`, then start the bridge:
+
+```bash
+python -m jevlight.local_server --backend rbdash --host 0.0.0.0 --port 8125
+```
+
+The default endpoints are `127.0.0.1:8125`, `127.0.0.1:8899` and
+`127.0.0.1:8000`; override one with `--jev_base_url` or
+`JEV_OPEN_VISION_BASE_URL`. Each method passes an image-choice preflight before
+SUMO starts. Begin with one matched case and seed:
+
+```bash
+python scripts/benchmark_vlalight_jev.py --method rbdash-decision --datasets jinan --seeds 1 --execute
+python scripts/benchmark_vlalight_jev.py --method d3-turbo --datasets jinan --seeds 1 --execute
+python scripts/benchmark_vlalight_jev.py --method amos-1-large --datasets jinan --seeds 1 --execute
+```

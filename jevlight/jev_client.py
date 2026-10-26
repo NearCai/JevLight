@@ -26,6 +26,7 @@ into the same :class:`JevResult`.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
@@ -205,16 +206,16 @@ class JevClient:
     ) -> JevResult:
         """Evaluate ``questions`` against ``state`` in one Jev request.
 
-        Passing ``assets={reference: Path(image)}`` opts into experimental
-        image input on the official transport. Reference the unique string in
-        a state/question value. Images use REST multipart even with an SDK.
+        Passing ``assets={reference: Path(image)}`` enables image input on the
+        official transport (multipart) and local System One servers (data URLs).
+        Reference the unique string in a state/question value.
 
         ``latency`` in the result starts after the pacing sleep (which is
         self-imposed waiting, not service time) but includes retry backoff —
         that is the real time the control loop waits for an answer.
         """
-        if assets and self.transport != "official":
-            raise ValueError("image assets require the official TypeSafe transport")
+        if assets and self.transport not in ("official", "local"):
+            raise ValueError("image assets require the official or local transport")
         if self.mock:
             if assets:
                 # A pipeline check, not a vision model or benchmark result.
@@ -527,17 +528,20 @@ class JevClient:
         if model_field:
             payload["model"] = model_field
         headers = {"Content-Type": "application/json"}
-        if assets:
+        if assets and self.transport == "official":
             # Image input is an experimental TypeSafe feature and is opt-in
             # on every request by design.
             headers["TypeSafe-Danger-Zone-Images"] = "true"
         if authorized:
             headers["Authorization"] = f"Bearer {self.api_key}"
         try:
-            if assets:
+            if assets and self.transport == "official":
                 files = self._image_parts(payload, assets)
                 del headers["Content-Type"]  # requests supplies the multipart boundary
                 request_body = {"files": files}
+            elif assets:
+                self._local_image_data_urls(payload, assets)
+                request_body = {"json": payload}
             else:
                 request_body = {"json": payload}
         except (OSError, ValueError, ImportError) as exc:
@@ -597,6 +601,34 @@ class JevClient:
             error="exhausted retries",
             rate_limited=True,
         )
+
+    @staticmethod
+    def _local_image_data_urls(payload: Dict[str, Any], assets: Mapping[str, Path]) -> None:
+        from PIL import Image
+
+        references = json.dumps([payload["state"], payload["questions"]], ensure_ascii=False)
+        images = []
+        for ref, filename in assets.items():
+            if not ref or ref not in references:
+                raise ValueError(f"unreferenced image asset: {ref!r}")
+            path = Path(filename)
+            if path.stat().st_size > 16 * 1024 * 1024:
+                raise ValueError("image exceeds the 16 MiB limit")
+            with Image.open(path) as image:
+                width, height = image.size
+                if (image.format not in ("PNG", "JPEG") or getattr(image, "n_frames", 1) != 1
+                        or not (256 <= width <= 1568 and 256 <= height <= 1568
+                                and width * height >= 78400)):
+                    raise ValueError("image format or dimensions are unsupported")
+                content_type = "image/png" if image.format == "PNG" else "image/jpeg"
+                image.verify()
+            images.append(f"data:{content_type};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}")
+        if isinstance(payload["state"], dict) and "camera_image" in payload["state"]:
+            payload["state"] = {key: value for key, value in payload["state"].items()
+                                 if key != "camera_image"}
+        payload["images"] = images
+        if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > 32 * 1024 * 1024:
+            raise ValueError("image request exceeds the 32 MiB body limit")
 
     @staticmethod
     def _image_parts(payload: Dict[str, Any], assets: Mapping[str, Path]) -> list:

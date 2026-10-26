@@ -16,9 +16,11 @@
 #                      (one prefill per question, no decoding).
 #   mock             Same /v1/systemone API with deterministic max-pressure
 #                   answers — end-to-end pipeline runs without a GPU or key.
+#   rbdash           RBDash-Decision image classifier (separate model env).
 #
 # Usage:
 #   scripts/serve_jev.sh --backend mock
+#   scripts/serve_jev.sh --backend rbdash --port 8125
 #   scripts/serve_jev.sh --model tev1                     # alias, see below
 #   scripts/serve_jev.sh --model <org>/<checkpoint>       # any HF repo id
 #   scripts/serve_jev.sh --model tev1 --dry-run           # print plan only
@@ -114,6 +116,14 @@ if [ "$BACKEND" = "mock" ]; then
   cd "$REPO_ROOT"
   run "$PYTHON" -m jevlight.local_server --backend mock \
     --host "$HOST" --port "$PORT" --model jev-mock
+  exit 0
+fi
+
+if [ "$BACKEND" = "rbdash" ]; then
+  MODEL_REPO=$(resolve_model "${MODEL:-RBDash-Team/RBDash-Decision-v0.2}")
+  cd "$REPO_ROOT"
+  run "$PYTHON" -m jevlight.local_server --backend rbdash \
+    --host "$HOST" --port "$PORT" --model "$MODEL_REPO"
   exit 0
 fi
 
